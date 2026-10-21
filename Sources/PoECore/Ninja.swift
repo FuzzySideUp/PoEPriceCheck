@@ -7,6 +7,8 @@ public struct NinjaPrice: Codable, Sendable, Equatable {
     public var volume: Double?         // exchange volume (divine) or listing count
     public var category: String
     public var corrupted: Bool
+    /// PoE 1 uniques: 5- or 6-link variant (nil = fewer links).
+    public var links: Int? = nil
 }
 
 public struct NinjaSnapshot: Codable, Sendable {
@@ -19,13 +21,15 @@ public struct NinjaSnapshot: Codable, Sendable {
     public var currencyById: [String: Double]
 }
 
-/// poe.ninja PoE 2 economy prices, cached to disk and refreshed every 15 minutes.
-public actor NinjaClient {
-    public static let exchangeTypes = ["Currency", "Fragments", "Abyss", "UncutGems", "LineageSupportGems", "Essences",
-                                       "SoulCores", "Idols", "Runes", "Ritual", "Expedition", "Delirium", "Breach", "Verisium"]
-    public static let stashTypes = ["UniqueWeapons", "UniqueArmours", "UniqueAccessories", "UniqueFlasks", "UniqueCharms",
-                                    "UniqueJewels", "UniqueSanctumRelics", "UniqueTablets", "PrecursorTablets"]
+extension NinjaSnapshot {
+    /// Units of the game's everyday currency per Divine Orb: chaos (PoE 1) or exalted (PoE 2).
+    public func smallPerDivine(_ game: Game) -> Double { game == .poe1 ? chaosPerDivine : exaltedPerDivine }
+}
 
+/// poe.ninja economy prices (PoE 1 or PoE 2), cached to disk and refreshed every 15 minutes.
+/// Prices are stored in Divine Orbs for both games; PoE 1's chaos values are converted.
+public actor NinjaClient {
+    public let game: Game
     private let session: URLSession
     private let cacheURL: URL
     private let userAgent: String
@@ -34,10 +38,11 @@ public actor NinjaClient {
     private var refreshTask: Task<NinjaSnapshot, Error>?
     public var maxAge: TimeInterval = 15 * 60
 
-    public init(cacheDirectory: URL, userAgent: String, session: URLSession = .shared) {
+    public init(cacheDirectory: URL, userAgent: String, game: Game = .poe2, session: URLSession = .shared) {
+        self.game = game
         self.session = session
         self.userAgent = userAgent
-        cacheURL = cacheDirectory.appendingPathComponent("ninja-poe2.json")
+        cacheURL = cacheDirectory.appendingPathComponent("ninja-\(game.rawValue).json")
         if let d = try? Data(contentsOf: cacheURL), let s = try? JSONDecoder.iso.decode(NinjaSnapshot.self, from: d) {
             snapshot = s
             byName = Self.index(s)
@@ -75,14 +80,17 @@ public actor NinjaClient {
     /// The league poe.ninja currently indexes (softcore, non-Standard), e.g. "Runes of Aldur".
     public func currentLeague() async throws -> String {
         struct S: Decodable { struct L: Decodable { let name: String; let hardcore: Bool?; let indexed: Bool? }; let economyLeagues: [L] }
-        let data = try await get(URL(string: "https://poe.ninja/poe2/api/data/index-state")!)
+        let data = try await get(URL(string: "\(game.ninjaBase)/api/data/index-state")!)
         let s = try JSONDecoder().decode(S.self, from: data)
-        if let l = s.economyLeagues.first(where: { $0.indexed == true && $0.hardcore != true }) { return l.name }
-        if let l = s.economyLeagues.first(where: { $0.hardcore != true && $0.name != "Standard" }) { return l.name }
+        // PoE 1's index-state has no hardcore flag: go by name.
+        let softcore = { (l: S.L) in l.hardcore != true && !l.name.hasPrefix("Hardcore") && !l.name.hasPrefix("HC ") }
+        if let l = s.economyLeagues.first(where: { $0.indexed == true && softcore($0) }) { return l.name }
+        if let l = s.economyLeagues.first(where: { softcore($0) && $0.name != "Standard" }) { return l.name }
         throw PriceError.noData("poe.ninja has no current league")
     }
 
-    public func lookup(name: String, baseType: String?, corrupted: Bool) -> NinjaPrice? {
+    /// `links`: the 5L/6L variant the user picked (PoE 1); nil prefers the unlinked price.
+    public func lookup(name: String, baseType: String?, corrupted: Bool, links: Int? = nil) -> NinjaPrice? {
         guard let hits = byName[TextUtil.normalize(name)], !hits.isEmpty else { return nil }
         var pool = hits
         if let b = baseType {
@@ -92,6 +100,8 @@ public actor NinjaClient {
         }
         let sameCorruption = pool.filter { $0.corrupted == corrupted }
         if !sameCorruption.isEmpty { pool = sameCorruption }
+        let sameLinks = pool.filter { $0.links == links }
+        if !sameLinks.isEmpty { pool = sameLinks }
         // Most-listed variant is the representative one.
         return pool.max { ($0.volume ?? 0) < ($1.volume ?? 0) }
     }
@@ -118,46 +128,71 @@ public actor NinjaClient {
             struct Line: Decodable { let id: String; let primaryValue: Double; let volumePrimaryValue: Double? }
             struct Item: Decodable { let id: String; let name: String; let category: String? }
             let core: Core; let lines: [Line]; let items: [Item]
+
+            /// Divine Orbs per unit of `primary` (PoE 2 is priced in divine, PoE 1 in chaos).
+            var toDivine: Double { core.primary == "divine" ? 1 : (core.rates["divine"] ?? 0) }
         }
         struct Stash: Decodable {
             struct Line: Decodable {
-                let name: String; let baseType: String?; let primaryValue: Double
-                let listingCount: Double?; let category: String?; let corrupted: Bool?
+                let name: String; let baseType: String?
+                let primaryValue: Double?        // PoE 2 (divine)
+                let chaosValue: Double?          // PoE 1
+                let divineValue: Double?         // PoE 1
+                let listingCount: Double?; let category: String?; let corrupted: Bool?; let links: Int?
             }
             let lines: [Line]
         }
 
+        var exchanges: [(String, Exchange)] = []
+        var stashes: [(String, Stash)] = []
+        let base = game.ninjaBase
         try await withThrowingTaskGroup(of: (String, Data).self) { group in
-            for t in Self.exchangeTypes {
-                let url = URL(string: "https://poe.ninja/poe2/api/economy/exchange/current/overview?league=\(q)&type=\(t)")!
+            for t in game.ninjaExchangeTypes {
+                let url = URL(string: "\(base)/api/economy/exchange/current/overview?league=\(q)&type=\(t)")!
                 group.addTask { ("x:" + t, try await self.get(url)) }
             }
-            for t in Self.stashTypes {
-                let url = URL(string: "https://poe.ninja/poe2/api/economy/stash/current/item/overview?league=\(q)&type=\(t)")!
+            for t in game.ninjaStashTypes {
+                let url = URL(string: "\(base)/api/economy/stash/current/item/overview?league=\(q)&type=\(t)")!
                 group.addTask { ("s:" + t, try await self.get(url)) }
             }
             for try await (key, data) in group {
                 let type = String(key.dropFirst(2))
                 if key.hasPrefix("x:") {
-                    guard let x = try? JSONDecoder().decode(Exchange.self, from: data) else { continue }
-                    if type == "Currency" {
-                        exPerDiv = x.core.rates["exalted"] ?? exPerDiv
-                        chaosPerDiv = x.core.rates["chaos"] ?? chaosPerDiv
-                    }
-                    let names = Dictionary(x.items.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-                    for l in x.lines {
-                        guard let it = names[l.id] else { continue }
-                        currencyById[l.id] = l.primaryValue
-                        prices.append(NinjaPrice(name: it.name, baseType: nil, divine: l.primaryValue,
-                                                 volume: l.volumePrimaryValue, category: type, corrupted: false))
-                    }
-                } else {
-                    guard let s = try? JSONDecoder().decode(Stash.self, from: data) else { continue }
-                    for l in s.lines {
-                        prices.append(NinjaPrice(name: l.name, baseType: l.baseType, divine: l.primaryValue,
-                                                 volume: l.listingCount, category: type, corrupted: l.corrupted ?? false))
-                    }
+                    if let x = try? JSONDecoder().decode(Exchange.self, from: data) { exchanges.append((type, x)) }
+                } else if let st = try? JSONDecoder().decode(Stash.self, from: data) {
+                    stashes.append((type, st))
                 }
+            }
+        }
+
+        for (type, x) in exchanges {
+            let k = x.toDivine
+            guard k > 0 else { continue }
+            if type == "Currency" {
+                if x.core.primary == "divine" {
+                    exPerDiv = x.core.rates["exalted"] ?? exPerDiv
+                    chaosPerDiv = x.core.rates["chaos"] ?? chaosPerDiv
+                } else {
+                    chaosPerDiv = 1 / k
+                    if let ex = x.lines.first(where: { $0.id == "exalted" }), ex.primaryValue > 0 { exPerDiv = chaosPerDiv / ex.primaryValue }
+                }
+            }
+            let names = Dictionary(x.items.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+            for l in x.lines {
+                guard let it = names[l.id] else { continue }
+                currencyById[l.id] = l.primaryValue * k
+                prices.append(NinjaPrice(name: it.name, baseType: nil, divine: l.primaryValue * k,
+                                         volume: l.volumePrimaryValue.map { $0 * k }, category: type, corrupted: false))
+            }
+        }
+        for (type, st) in stashes {
+            for l in st.lines {
+                let divine: Double
+                if let c = l.chaosValue, chaosPerDiv > 0 { divine = c / chaosPerDiv }
+                else if let d = l.divineValue ?? l.primaryValue { divine = d }
+                else { continue }
+                prices.append(NinjaPrice(name: l.name, baseType: l.baseType, divine: divine, volume: l.listingCount,
+                                         category: type, corrupted: l.corrupted ?? false, links: l.links))
             }
         }
         guard !prices.isEmpty else { throw PriceError.noData("poe.ninja returned no prices for \(league)") }

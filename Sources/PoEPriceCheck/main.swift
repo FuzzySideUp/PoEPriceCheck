@@ -9,7 +9,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var keyTap: KeyTap?
     private var keyTapRetry: Timer?
     private var lastFire = Date.distantPast
-    private var leagues: [String] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
@@ -47,7 +46,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                                             object: nil, suspensionBehavior: .deliverImmediately)
         controller.warmUp()
         if CommandLine.arguments.contains("--selftest") { controller.selfTest() }
-        Task { leagues = (try? await controller.trade.leagues()) ?? [] }
     }
 
     @objc private func remoteCheck() { fire("notification") }
@@ -117,15 +115,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(.separator())
 
+        let auto = Settings.autoGame
+        menu.addItem(submenu("Game", [("Auto (now \(Settings.game == .poe1 ? "PoE 1" : "PoE 2"))", auto, { [weak self] in self?.selectGame(nil) })]
+            + Game.allCases.map { g in (g.title, !auto && g == Settings.game, { [weak self] in self?.selectGame(g) }) }))
+
         menu.addItem(submenu("Hotkey", HotKey.presets.map { combo in
             (combo.title, combo == Settings.hotKey, { [weak self] in Settings.hotKey = combo; self?.registerHotKey() })
         }))
 
-        let detected = UserDefaults.standard.string(forKey: "detectedLeague")
+        let detected = Settings.detectedLeague
         var leagueItems: [(String, Bool, () -> Void)] = [("Auto (\(detected.map { "seen in game: \($0)" } ?? "poe.ninja current"))",
                                                            Settings.league == nil, { Settings.league = nil })]
-        for l in leagues { leagueItems.append((l, Settings.league == l, { Settings.league = l })) }
-        menu.addItem(submenu("League", leagueItems))
+        for l in controller.knownLeagues { leagueItems.append((l, Settings.league == l, { Settings.league = l })) }
+        menu.addItem(submenu("League (\(Settings.game == .poe1 ? "PoE 1" : "PoE 2"))", leagueItems))
 
         menu.addItem(submenu("Default min-value margin", [0.05, 0.10, 0.15, 0.20, 0.30].map { m in
             ("\(Int(m * 100))% below roll", abs(Settings.margin - m) < 0.001, { Settings.margin = m })
@@ -162,6 +164,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         parent.submenu = sub
         return parent
+    }
+
+    /// nil = Auto.
+    private func selectGame(_ g: Game?) {
+        do {
+            try controller.setGameMode(g)
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Couldn't load \(g?.title ?? "game") data"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+            return
+        }
     }
 
     @objc private func priceCheck() {

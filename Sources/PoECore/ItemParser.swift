@@ -11,13 +11,28 @@ public struct ItemParser {
     public static let separator = "--------"
 
     /// Item class line shown under the name in PoE 2 tooltips.
-    static let itemClasses: Set<String> = [
+    static let poe2ItemClasses: Set<String> = [
         "ring", "amulet", "belt", "jewel", "body armour", "helmet", "gloves", "boots", "shield", "buckler", "focus",
         "quiver", "sceptre", "wand", "staff", "quarterstaff", "warstaff", "bow", "crossbow", "spear", "flail", "dagger",
         "claw", "talisman", "one hand mace", "two hand mace", "one hand sword", "two hand sword", "one hand axe",
         "two hand axe", "one handed mace", "two handed mace", "one handed sword", "two handed sword", "one handed axe",
         "two handed axe", "life flask", "mana flask", "charm", "waystone", "tablet", "relic", "fishing rod",
         "skill gem", "support gem", "meta gem", "stackable currency", "omen", "rune", "soul core", "idol", "map fragment",
+    ]
+
+    /// PoE 1 has no item class line; only weapons show their class ("Two Handed Sword") above the damage.
+    static let poe1ItemClasses: Set<String> = [
+        "bow", "claw", "dagger", "rune dagger", "staff", "warstaff", "wand", "sceptre", "fishing rod",
+        "one handed sword", "thrusting one handed sword", "two handed sword", "one handed axe", "two handed axe",
+        "one handed mace", "two handed mace", "abyss",
+    ]
+
+    var itemClasses: Set<String> { data.game == .poe1 ? Self.poe1ItemClasses : Self.poe2ItemClasses }
+
+    /// PoE 1 lines that carry no price information.
+    private static let poe1Ignored: Set<String> = [
+        "mirrored", "split", "synthesised item", "fractured item", "shaper item", "elder item", "crusader item",
+        "hunter item", "redeemer item", "warlord item", "searing exarch item", "eater of worlds item", "foulborn",
     ]
 
     /// "VICTORY SMASHER" -> "Victory Smasher" (PoE 2 renders tooltips in small caps).
@@ -50,9 +65,11 @@ public struct ItemParser {
         // Header: the first block (name/base). Guard against a merged header+body block.
         var headerLines = Array(header.prefix(3))
         var body = Array(blocks.dropFirst())
-        if header.count > 3 {
-            headerLines = Array(header.prefix(2))
-            body.insert(Array(header.dropFirst(2)), at: 0)
+        // A "Label: value" line is never part of the name: PoE 1 puts "Stack Size: 1/5" close under the name.
+        let split = header.indices.dropFirst().first { header[$0].text.contains(":") } ?? min(header.count, header.count > 3 ? 2 : 3)
+        if split < header.count {
+            headerLines = Array(header.prefix(split))
+            body.insert(Array(header.dropFirst(split)), at: 0)
         }
         parseHeader(headerLines, into: &item)
 
@@ -66,7 +83,7 @@ public struct ItemParser {
                 let text = TextUtil.clean(line.text)
                 i += 1
                 if text.isEmpty || text == Self.separator { continue }
-                if Self.itemClasses.contains(TextUtil.normalize(text)) { continue }   // "RING", "BODY ARMOUR"…
+                if itemClasses.contains(TextUtil.normalize(text)) { continue }   // "RING", "BODY ARMOUR"…
                 if parseSpecial(text, into: &item) { continue }
                 if item.rarity == .unique, line.color == .unique { continue }        // flavour text
                 if item.rarity == .currency || item.rarity == .gem {
@@ -94,11 +111,22 @@ public struct ItemParser {
             if !mods.isEmpty { modBlocks.append(mods) }
         }
 
+        // PoE 1 crafted mods and enchants share a colour: a block of nothing but those is the enchant block.
+        if data.game == .poe1 {
+            for idx in modBlocks.indices where modBlocks[idx].allSatisfy({ $0.kind == .crafted }) {
+                modBlocks[idx] = modBlocks[idx].map { var m = $0; m.kind = .enchant; return m }
+            }
+        }
+
         // When explicit-coloured mods come in two blocks, the first one is the implicit block.
-        let plainBlocks = modBlocks.indices.filter { idx in modBlocks[idx].allSatisfy { $0.kind == .explicit } }
+        // (PoE 1 explicit blocks can end with a crafted mod.)
+        let plainBlocks = modBlocks.indices.filter { idx in
+            modBlocks[idx].allSatisfy { $0.kind == .explicit || (data.game == .poe1 && $0.kind == .crafted) }
+                && modBlocks[idx].contains { $0.kind == .explicit }
+        }
         if plainBlocks.count >= 2 {
             let first = plainBlocks[0]
-            modBlocks[first] = modBlocks[first].map { var m = $0; m.kind = .implicit; return m }
+            modBlocks[first] = modBlocks[first].map { var m = $0; if m.kind == .explicit { m.kind = .implicit }; return m }
         }
         item.mods = modBlocks.flatMap { $0 }
 
@@ -203,7 +231,9 @@ public struct ItemParser {
 
     // MARK: - Body
 
-    private func parseSpecial(_ text: String, into item: inout ParsedItem) -> Bool {
+    private func parseSpecial(_ raw: String, into item: inout ParsedItem) -> Bool {
+        // OCR reads PoE 1's property bullets as "•" or "»": drop leading punctuation.
+        let text = String(raw.drop { !($0.isLetter || $0.isNumber || $0 == "+" || $0 == "-") })
         let lower = text.lowercased()
         if lower == "corrupted" { item.corrupted = true; return true }
         if lower.hasPrefix("unidentified") {        // "UNIDENTIFIED (TIER 5)"
@@ -215,8 +245,9 @@ public struct ItemParser {
             item.itemLevel = TextUtil.numbers(in: text).first.map { Int($0) }
             return true
         }
-        if lower.hasPrefix("stack size") {
-            let n = TextUtil.numbers(in: text.replacingOccurrences(of: "/", with: " / "))
+        if let r = lower.range(of: "stack size") {
+            // Junk can precede it when Vision merges the row with stash text ("3620 3OSTACK SIZE: 5/20").
+            let n = TextUtil.numbers(in: String(lower[r.upperBound...]).replacingOccurrences(of: "/", with: " / "))
             item.stackSize = n.first.map { Int(abs($0)) }
             if n.count > 1 { item.maxStackSize = Int(abs(n[1])) }
             return true
@@ -233,17 +264,36 @@ public struct ItemParser {
             || lower.hasPrefix("shift click") || lower.hasPrefix("can be used") {
             return true
         }
+        if data.game == .poe1 {
+            if Self.poe1Ignored.contains(TextUtil.normalize(text)) { return true }
+            // Stash price notes ("Note: ~price 5 chaos"), map instructions.
+            if lower.hasPrefix("note:") || lower.hasPrefix("travel to this") || lower.hasPrefix("can only be used") { return true }
+        }
         return false
     }
 
-    /// "Armour: 412" -> ("Armour", "412"). Only for known property labels.
+    /// "Armour: 412" -> ("Armour", "412"). Only for known property labels. Tolerates OCR junk before the
+    /// label ("emS : Physical Damage: 176-313") and small typos ("Elemental Damace"), returning the real label.
     static func property(_ text: String) -> (String, String)? {
-        guard let colon = text.firstIndex(of: ":") else { return nil }
-        let label = String(text[..<colon]).trimmingCharacters(in: .whitespaces)
-        let value = String(text[text.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
-        let key = TextUtil.normalize(label)
-        if knownProperties.contains(key) { return (label, value) }
+        for colon in text.indices.reversed() where text[colon] == ":" {
+            let label = String(text[..<colon]).trimmingCharacters(in: .whitespaces)
+            let value = String(text[text.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+            let key = TextUtil.normalize(label)
+            if knownProperties.contains(key) { return (label, value) }
+            let words = key.split(separator: " ")
+            for start in words.indices {
+                let tail = words[start...].joined(separator: " ")
+                if knownProperties.contains(tail) { return (titled(tail), value) }
+                if tail.count >= 6, let hit = knownProperties.first(where: { TextUtil.similarity($0, tail) >= 0.86 }) {
+                    return (titled(hit), value)
+                }
+            }
+        }
         return nil
+    }
+
+    private static func titled(_ s: String) -> String {
+        s.split(separator: " ").map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined(separator: " ")
     }
 
     private func modLine(_ raw: String, color: TextColor) -> ModLine? {
@@ -253,7 +303,7 @@ public struct ItemParser {
         guard data.matchStat(text) != nil else { return nil }
         let kind: ModKind
         switch color {
-        case .enchant: kind = .rune
+        case .enchant: kind = data.game == .poe1 ? .crafted : .rune
         case .fractured: kind = .fractured
         case .desecrated: kind = .desecrated
         default: kind = .explicit

@@ -9,6 +9,10 @@ enum TestData {
     static let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../..").standardized
     static let gameData: GameData = try! GameData(directory: root.appendingPathComponent("Data/poe2"))
     static var parser: ItemParser { ItemParser(data: gameData) }
+    static let poe1Data: GameData = try! GameData(directory: root.appendingPathComponent("Data/poe1"), game: .poe1)
+    static var poe1Parser: ItemParser { ItemParser(data: poe1Data) }
+    static func data(_ game: Game) -> GameData { game == .poe1 ? poe1Data : gameData }
+    static var detector: GameDetector { GameDetector(data: [.poe1: poe1Data, .poe2: gameData]) }
 
     /// Text-only tooltip: "--------" lines separate blocks.
     static func lines(_ text: String, color: TextColor = .other) -> [OCRLine] {

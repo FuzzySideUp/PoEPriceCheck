@@ -16,10 +16,14 @@ UA="PoEPriceCheck/0.1 (macOS; personal OCR price-check overlay)"
 if [[ "${1:-}" == "--refresh-data" ]]; then
   for e in stats items; do
     curl -fsS -A "$UA" -o "Data/poe2/$e.json" "https://www.pathofexile.com/api/trade2/data/$e"
+    curl -fsS -A "$UA" -o "Data/poe1/$e.json" "https://www.pathofexile.com/api/trade/data/$e"
   done
+  python3 -I tools/trim_stats.py Data/poe1/stats.json
   mkdir -p .cache
   curl -fsS -o .cache/repoe_base_items.json https://repoe-fork.github.io/poe2/base_items.min.json
-  python3 -I tools/gen_base_items.py .cache/repoe_base_items.json Data/poe2
+  curl -fsS -o .cache/repoe_poe1_base_items.json https://repoe-fork.github.io/base_items.min.json
+  python3 -I tools/gen_base_items.py .cache/repoe_base_items.json Data/poe2 poe2
+  python3 -I tools/gen_base_items.py .cache/repoe_poe1_base_items.json Data/poe1 poe1
 fi
 
 swift build -c release --scratch-path "$SCRATCH" --product PoEPriceCheck
@@ -29,9 +33,12 @@ BIN="$(swift build -c release --scratch-path "$SCRATCH" --show-bin-path)/PoEPric
 pkill -x PoEPriceCheck 2>/dev/null || true
 
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/poe2"
+mkdir -p "$APP/Contents/MacOS"
 cp "$BIN" "$APP/Contents/MacOS/PoEPriceCheck"
-cp Data/poe2/base_items.json Data/poe2/items.json Data/poe2/stats.json "$APP/Contents/Resources/poe2/"
+for game in poe1 poe2; do
+  mkdir -p "$APP/Contents/Resources/$game"
+  cp Data/$game/base_items.json Data/$game/items.json Data/$game/stats.json "$APP/Contents/Resources/$game/"
+done
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

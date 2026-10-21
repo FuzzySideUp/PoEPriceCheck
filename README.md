@@ -1,6 +1,7 @@
 # PoEPriceCheck
 
-A macOS menu-bar price checker for **Path of Exile 2** that works while you play through **GeForce NOW**.
+A macOS menu-bar price checker for **Path of Exile 2** and **Path of Exile 1** that works while you play through
+**GeForce NOW**.
 
 Overlays like Awakened PoE Trade and Exiled Exchange 2 read the item text from the clipboard. Under
 GeForce NOW the game runs on NVIDIA's cloud PC, so that clipboard never reaches your Mac. PoEPriceCheck
@@ -29,6 +30,15 @@ small panel shows the price next to the cursor.
   - lets you tick/untick stats and change the margin in the panel, then **Search again**, or
     **Open on trade site**
 - **Unidentified items:** priced by base type and unidentified tier.
+- **PoE 1 or PoE 2, detected automatically:** with menu › Game › Auto (the default) each check works out
+  which game the tooltip is from: the league in the area overlay, the window title if it names the game,
+  PoE 2's item class line and "Requires:" wording, and which game's data knows the item. Items both games
+  have (Divine Orb) keep the last game. The panel footer shows the game; hover it for the reason. You can
+  also fix the game to PoE 1 or PoE 2 in the same menu. PoE 1 uses poe.ninja's PoE 1 prices
+  (shown in chaos and divine) and the PoE 1 trade site. OCR can't see sockets, so for body armours and
+  two-handed weapons the panel has a **Links** control (Any / 5L / 6L) that picks the 5L/6L poe.ninja price
+  or adds a links filter to the trade search. PoE 1 tooltips show no item level unless you hold Alt, so
+  PoE 1 searches don't filter on item level.
 - **League:** read from the in-game area overlay when it's on screen (e.g. "Forbidden Rites League");
   otherwise poe.ninja's current league, or pick one from the menu.
 - Respects GGG's `X-Rate-Limit-*` headers.
@@ -88,15 +98,15 @@ swift test --scratch-path ~/Library/Caches/PoEPriceCheck/build
   shows what the OCR sees, the parsed item, the fuzzy search, and optionally live prices.
 - With **Save captures** on, each check writes a PNG and OCR JSON to
   `~/Library/Application Support/PoEPriceCheck/captures`. A step-by-step log is in `log.txt` next to it.
-- `scripts/build_app.sh --refresh-data` re-downloads trade stats and base types after a patch.
+- `ocrtool … --game poe1` uses the PoE 1 data and APIs.
+- `scripts/build_app.sh --refresh-data` re-downloads trade stats and base types (both games) after a patch.
 - If the project lives in an iCloud-synced folder, keep builds outside it (as above): Finder metadata
   on build products breaks code signing.
 
 ## Status
 
-Early and PoE 2 only. Tested on one 4K display at 1× scaling. Other resolutions should work, but the
-detection thresholds were tuned on 4K captures. PoE 1 support (poe.ninja + `api/trade`) is a natural next
-step.
+Early. Tested on one 4K display at 1× scaling. Other resolutions should work, but the detection thresholds
+were tuned on 4K captures. PoE 2 is the most tested; PoE 1 support is new.
 
 ## License
 
@@ -107,5 +117,5 @@ Path of Exile content, which belongs to Grinding Gear Games.
 
 Unofficial fan project, not affiliated with or endorsed by Grinding Gear Games or NVIDIA. Price data
 comes from [poe.ninja](https://poe.ninja) and the
-[official trade site](https://www.pathofexile.com/trade2). Base-type data comes from
-[RePoE](https://github.com/repoe-fork/repoe-fork). Use the trade API considerately.
+official trade site ([PoE 1](https://www.pathofexile.com/trade), [PoE 2](https://www.pathofexile.com/trade2)).
+Base-type data comes from [RePoE](https://github.com/repoe-fork/repoe-fork). Use the trade API considerately.

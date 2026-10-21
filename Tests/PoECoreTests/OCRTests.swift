@@ -60,10 +60,11 @@ final class SyntheticOCRTests: XCTestCase {
 }
 
 /// Real captures: Fixtures/screens/<name>.jpg|png with <name>.expected.json
-/// ({"rarity", "name", "baseType", "itemLevel", "stackSize", "minMods", "corrupted", "enabledStats": [display strings], "cursor": [x, y]}).
+/// ({"game": "poe1"|"poe2" (default poe2), "autoShared" (item exists in both games: Auto keeps the last game), "rarity", "name", "baseType", "itemLevel", "stackSize", "minMods", "corrupted",
+///   "enabledStats": [display strings], "cursor": [x, y]}).
 final class FixtureOCRTests: XCTestCase {
     struct Expected: Decodable {
-        var rarity: String?; var name: String?; var baseType: String?
+        var game: String?; var autoShared: Bool?; var rarity: String?; var name: String?; var baseType: String?
         var itemLevel: Int?; var stackSize: Int?; var minMods: Int?; var corrupted: Bool?; var unidentified: Bool?
         var enabledStats: [String]?; var cursor: [Double]?
     }
@@ -79,7 +80,15 @@ final class FixtureOCRTests: XCTestCase {
             guard let image else { XCTFail("missing image for \(name)"); continue }
             let e = try JSONDecoder().decode(Expected.self, from: Data(contentsOf: exp))
             let cursor = e.cursor.map { CGPoint(x: $0[0], y: $0[1]) }
-            let item = TestData.parser.parse(try TooltipReader.read(image: image, cursor: cursor).lines)
+            let game = e.game.flatMap(Game.init(rawValue:)) ?? .poe2
+            let data = TestData.data(game)
+            let read = try TooltipReader.read(image: image, cursor: cursor)
+            let item = ItemParser(data: data).parse(read.lines)
+            // Auto mode must pick this fixture's game even when the last check was the other game.
+            let other: Game = game == .poe1 ? .poe2 : .poe1
+            let detected = TestData.detector.decide(tooltip: read.lines, allLines: read.allLines, leagues: [:],
+                                                    last: e.autoShared == true ? game : other)
+            XCTAssertEqual(detected.game, game, "\(name): auto picked \(detected.game) (\(detected.reason))")
             if let r = e.rarity { XCTAssertEqual(item.rarity.rawValue, r, name) }
             if let n = e.name { XCTAssertEqual(item.name, n, name) }
             if let b = e.baseType { XCTAssertEqual(item.baseType, b, name) }
@@ -89,7 +98,7 @@ final class FixtureOCRTests: XCTestCase {
             if let c = e.corrupted { XCTAssertEqual(item.corrupted, c, name) }
             if let u = e.unidentified { XCTAssertEqual(item.unidentified, u, name) }
             if let wanted = e.enabledStats {
-                let s = RareQueryBuilder(data: TestData.gameData).build(item)
+                let s = RareQueryBuilder(data: data).build(item)
                 let enabled = s.filters.filter(\.enabled).map { $0.display(margin: s.margin) }
                 for w in wanted { XCTAssertTrue(enabled.contains(w), "\(name): \(w) not in \(enabled)") }
             }

@@ -45,8 +45,11 @@ public struct RareSearch: Sendable, Equatable {
     public var useItemLevel: Bool
     public var nonCorruptedOnly: Bool
     public var status: String
-    /// Unidentified items: search unidentified listings of at least this tier.
+    /// Unidentified items: search unidentified listings of at least this tier (PoE 2; PoE 1 has no tiers).
     public var unidentifiedTier: Int?
+    /// PoE 1: minimum linked sockets (5L/6L), picked in the panel since OCR can't see sockets.
+    public var links: Int?
+    public var game: Game = .poe2
     /// Human-readable notes about what auto-relaxation changed.
     public var relaxNotes: [String] = []
 
@@ -54,23 +57,24 @@ public struct RareSearch: Sendable, Equatable {
 
     public func queryJSON() -> [String: Any] {
         var statFilters: [[String: Any]] = []
-        var equipment: [String: Any] = [:]
+        var propertyGroups: [String: [String: Any]] = [:]
         for f in filters where f.enabled {
             switch f.target {
             case let .stat(id): statFilters.append(["id": id, "value": ["min": f.minValue(margin: margin)]])
-            case let .equipment(key): equipment[key] = ["min": f.minValue(margin: margin)]
+            case let .equipment(key): propertyGroups[game.propertyFilterGroup(key), default: [:]][key] = ["min": f.minValue(margin: margin)]
             }
         }
         var typeFilters: [String: Any] = ["rarity": ["option": "nonunique"]]
         if let c = category, !useBaseType { typeFilters["category"] = ["option": c] }
         if useItemLevel, let floor = itemLevelFloor { typeFilters["ilvl"] = ["min": floor] }
         var filters: [String: Any] = ["type_filters": ["filters": typeFilters]]
-        if !equipment.isEmpty { filters["equipment_filters"] = ["filters": equipment] }
+        for (group, values) in propertyGroups { filters[group] = ["filters": values] }
+        if let links { filters["socket_filters"] = ["filters": ["links": ["min": links]]] }
         var misc: [String: Any] = [:]
         if nonCorruptedOnly { misc["corrupted"] = ["option": "false"] }
         if let tier = unidentifiedTier {
             misc["identified"] = ["option": "false"]
-            misc["unidentified_tier"] = ["min": tier]
+            if game == .poe2 { misc["unidentified_tier"] = ["min": tier] }
         }
         if !misc.isEmpty { filters["misc_filters"] = ["filters": misc] }
 
@@ -194,6 +198,12 @@ public struct RareQueryBuilder {
                                       target: .stat(stat.id), rolled: avg, weight: w, enabled: false, sources: [mod.text]))
         }
 
+        // PoE 1's pseudo totals count life from Strength and mana from Intelligence (1 per 2 points).
+        if data.game == .poe1 {
+            if let life = pseudo[.life], let str = pseudo[.str] { pseudo[.life] = (life.0 + (str.0 / 2).rounded(.down), life.1 + str.1) }
+            if let mana = pseudo[.mana], let int = pseudo[.int] { pseudo[.mana] = (mana.0 + (int.0 / 2).rounded(.down), mana.1 + int.1) }
+        }
+
         let pseudoMeta: [(Pseudo, Int)] = [(.life, 9), (.eleRes, 8), (.chaosRes, 6), (.es, 6), (.str, 4), (.dex, 4), (.int, 4), (.mana, 3)]
         for (p, w) in pseudoMeta {
             guard let (v, src) = pseudo[p], v > 0, let stat = data.pseudoStats[p.rawValue] else { continue }
@@ -216,7 +226,8 @@ public struct RareQueryBuilder {
         return RareSearch(filters: filters, margin: margin, category: item.category, baseType: item.baseType,
                           useBaseType: item.category == nil, itemLevel: item.itemLevel, useItemLevel: item.itemLevel != nil,
                           nonCorruptedOnly: !item.corrupted, status: status,
-                          unidentifiedTier: item.unidentified ? Int(item.properties["Unidentified Tier"] ?? "") ?? 1 : nil)
+                          unidentifiedTier: item.unidentified ? Int(item.properties["Unidentified Tier"] ?? "") ?? 1 : nil,
+                          game: data.game)
     }
 
     /// Local defence and weapon damage mods are already reflected in the item's
@@ -243,10 +254,15 @@ public struct RareQueryBuilder {
     }
 
     /// How much a stat tends to drive price. >= 5 is searched by default.
+    /// PoE 1 and PoE 2 word most stats differently ("Critical Strike" vs "Critical Hit"), so one table serves both.
     static func weight(_ key: String, isWeapon: Bool, local: Bool) -> Int {
         let rules: [(String, Int)] = [
             ("to level of all", 10), ("movement speed", 10), ("to spirit", 8),
             ("critical damage bonus", 6), ("critical hit chance", local ? 4 : 6),
+            // PoE 1
+            ("to all maximum resistances", 9), ("to level of socketed", 7), ("suppress spell damage", 8),
+            ("critical strike multiplier", 6), ("critical strike chance", local ? 4 : 6),
+            ("damage over time multiplier", 6), ("reservation efficiency", 6),
             ("increased spell damage", 6), ("gain #% of damage as extra", 6), ("damage as extra", 6),
             ("increased fire damage", 5), ("increased cold damage", 5), ("increased lightning damage", 5),
             ("increased chaos damage", 5), ("increased elemental damage", 5), ("increased physical damage", 5),

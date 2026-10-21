@@ -13,7 +13,7 @@ extension PriceCheckController {
               let image = CGImageSourceCreateImageAtIndex(src, 0, nil) else { print("cannot read \(input)"); return }
         do {
             let read = try TooltipReader.read(image: image, cursor: cursor)
-            let item = ItemParser(data: data).parse(read.lines)
+            let item = parse(read, windowTitle: nil)
             model.reset()
             model.zoom = 1.25
             model.item = item

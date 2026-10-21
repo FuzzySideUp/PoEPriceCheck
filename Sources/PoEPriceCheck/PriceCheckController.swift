@@ -6,9 +6,22 @@ import UniformTypeIdentifiers
 /// Hotkey → capture → OCR → parse → price → panel.
 @MainActor
 final class PriceCheckController {
-    let data: GameData
-    let ninja: NinjaClient
-    let trade: TradeClient
+    /// Data and API clients for one game. Both stay loaded so switching back keeps caches and rate-limit state.
+    struct GameContext {
+        let data: GameData
+        let ninja: NinjaClient
+        let trade: TradeClient
+        var knownLeagues: [String]
+    }
+    private var contexts: [Game: GameContext] = [:]
+    private(set) var game: Game
+    var data: GameData { contexts[game]!.data }
+    var ninja: NinjaClient { contexts[game]!.ninja }
+    var trade: TradeClient { contexts[game]!.trade }
+    var knownLeagues: [String] {
+        get { contexts[game]!.knownLeagues }
+        set { contexts[game]!.knownLeagues = newValue }
+    }
     let model = PanelModel()
     private(set) lazy var panel: ResultPanel = {
         let p = ResultPanel(model: model)
@@ -16,38 +29,90 @@ final class PriceCheckController {
         return p
     }()
     private var task: Task<Void, Never>?
-    private var resolvedLeague: String?
+    private var resolvedLeague: [Game: String] = [:]
     private var lastCapture: ScreenCapturer.Capture?
-    var knownLeagues = ["Forbidden Rites", "Runes of Aldur", "Standard", "HC Forbidden Rites", "HC Runes of Aldur", "Hardcore"]
+
+    static func defaultLeagues(_ game: Game) -> [String] {
+        game == .poe1 ? ["Standard", "Hardcore"]
+            : ["Forbidden Rites", "Runes of Aldur", "Standard", "HC Forbidden Rites", "HC Runes of Aldur", "Hardcore"]
+    }
+
+    static func makeContext(_ game: Game) throws -> GameContext {
+        let dir = Bundle.main.resourceURL!.appendingPathComponent(game.dataFolder)
+        return GameContext(data: try GameData(directory: dir, game: game),
+                           ninja: NinjaClient(cacheDirectory: Settings.supportDirectory, userAgent: Settings.userAgent, game: game),
+                           trade: TradeClient(userAgent: Settings.userAgent, game: game),
+                           knownLeagues: defaultLeagues(game))
+    }
 
     init() throws {
-        let dir = Bundle.main.resourceURL!.appendingPathComponent("poe2")
-        data = try GameData(directory: dir)
-        ninja = NinjaClient(cacheDirectory: Settings.supportDirectory, userAgent: Settings.userAgent)
-        trade = TradeClient(userAgent: Settings.userAgent)
+        game = Settings.game
+        contexts[game] = try Self.makeContext(game)
+        if Settings.autoGame { try loadAllGames() }
+        model.game = game
+        model.autoGame = Settings.autoGame
 
         model.onClose = { [weak self] in self?.panel.dismiss() }
         model.onOpenURL = { NSWorkspace.shared.open($0) }
         model.onSearch = { [weak self] s in self?.runRareSearch(s, autoRelax: false) }
         model.onTradeSearch = { [weak self] in self?.runNameSearch() }
+        model.onLinksChanged = { [weak self] in self?.linksChanged() }
         model.onOpenPermissionSettings = {
             NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
         }
     }
 
+    private func loadAllGames() throws {
+        for g in Game.allCases where contexts[g] == nil { contexts[g] = try Self.makeContext(g) }
+    }
+
+    /// Menu › Game: nil = Auto (detect from each tooltip), else a fixed game. Loads data on first use and warms caches.
+    func setGameMode(_ fixed: Game?) throws {
+        task?.cancel()
+        panel.dismiss()
+        if let g = fixed {
+            if contexts[g] == nil { contexts[g] = try Self.makeContext(g) }
+            Settings.autoGame = false
+            use(g)
+        } else {
+            try loadAllGames()
+            Settings.autoGame = true
+        }
+        model.autoGame = Settings.autoGame
+        Log.info("game mode: \(fixed?.rawValue ?? "auto") (current \(game.rawValue))")
+        warmUp()
+    }
+
+    private func use(_ g: Game) {
+        Settings.game = g
+        game = g
+        model.game = g
+    }
+
     /// Warm caches so the first check is quick.
     func warmUp() {
-        Task { knownLeagues = (try? await trade.leagues()) ?? knownLeagues }
+        // Auto mode warms both games so the first check of either is quick.
+        let games = Settings.autoGame ? Array(contexts.keys) : [game]
+        for g in games { warmUp(g) }
+        warmUpVision()
+    }
+
+    private func warmUp(_ g: Game) {
+        guard let ctx = contexts[g] else { return }
+        Task { if let ls = try? await ctx.trade.leagues() { contexts[g]?.knownLeagues = ls } }
         Task {
             let t0 = Date()
-            guard let league = try? await league() else { return }
+            guard let league = try? await league(for: g) else { return }
             do {
-                let snap = try await ninja.ensure(league: league)
+                let snap = try await ctx.ninja.ensure(league: league)
                 Log.info(String(format: "warmUp: ninja %d prices for %@ in %.2fs", snap.prices.count, league, Date().timeIntervalSince(t0)))
             } catch {
                 Log.info("warmUp: ninja failed: \(error)")
             }
         }
+    }
+
+    private func warmUpVision() {
         Task.detached(priority: .utility) {
             // First Vision call loads the OCR model; do it now rather than on the first hotkey.
             let t0 = Date()
@@ -73,20 +138,23 @@ final class PriceCheckController {
     }
 
     /// Settings › League, else poe.ninja's current league (4s timeout), else the last one that worked.
-    func league() async throws -> String {
-        if let l = Settings.league { return l }
-        if let l = UserDefaults.standard.string(forKey: "detectedLeague") { return l }
-        if let l = resolvedLeague { return l }
+    func league() async throws -> String { try await league(for: game) }
+
+    func league(for game: Game) async throws -> String {
+        if let l = Settings.league(for: game) { return l }
+        if let l = Settings.detectedLeague(for: game) { return l }
+        if let l = resolvedLeague[game] { return l }
         let t0 = Date()
+        guard let ninja = contexts[game]?.ninja else { throw PriceError.noData("\(game.title) data not loaded") }
         do {
-            let l = try await withTimeout(4) { try await self.ninja.currentLeague() }
-            Log.info(String(format: "league: %@ from poe.ninja in %.2fs", l, Date().timeIntervalSince(t0)))
-            resolvedLeague = l
-            UserDefaults.standard.set(l, forKey: "lastLeague")
+            let l = try await withTimeout(4) { try await ninja.currentLeague() }
+            Log.info(String(format: "league: %@ from poe.ninja (%@) in %.2fs", l, game.rawValue, Date().timeIntervalSince(t0)))
+            resolvedLeague[game] = l
+            Settings.setLastLeague(l, for: game)
             return l
         } catch {
             let cached = await ninja.snapshot?.league
-            let fallback = UserDefaults.standard.string(forKey: "lastLeague") ?? cached
+            let fallback = Settings.lastLeague(for: game) ?? cached
             Log.info(String(format: "league lookup failed after %.2fs (%@); using %@", Date().timeIntervalSince(t0),
                             "\(error)", fallback ?? "nothing"))
             if let fallback { return fallback }
@@ -133,9 +201,8 @@ final class PriceCheckController {
             }
             if Task.isCancelled { return }
             model.ocrLines = read.lines.map { "[\($0.color.rawValue)] \($0.text)" }
-            if let l = TooltipReader.detectLeague(in: read.allLines, known: knownLeagues),
-               l != UserDefaults.standard.string(forKey: "detectedLeague") {
-                UserDefaults.standard.set(l, forKey: "detectedLeague")
+            if let l = TooltipReader.detectLeague(in: read.allLines, known: knownLeagues), l != Settings.detectedLeague {
+                Settings.detectedLeague = l
                 Log.info("league detected on screen: \(l)")
             }
 
@@ -175,9 +242,37 @@ final class PriceCheckController {
             try TooltipReader.read(image: image, cursor: cursor)
         }.value
         Log.info(String(format: "ocr %.2fs: %d lines total, %d in tooltip %@", read.ocrSeconds, read.allLines.count, read.lines.count, "\(read.tooltipRect)"))
-        let item = ItemParser(data: data).parse(read.lines)
+        let item = parse(read, windowTitle: Self.frontWindowTitle())
         Log.info("parsed: rarity=\(item.rarity) name=\(item.name ?? "-") base=\(item.baseType ?? "-") ilvl=\(item.itemLevel.map(String.init) ?? "-") mods=\(item.mods.count)")
         return (capture, read, item)
+    }
+
+    /// Parses with the current game, or in Auto mode with whichever game the tooltip turns out to be (switching to it).
+    func parse(_ read: TooltipReader.Result, windowTitle title: String?) -> ParsedItem {
+        var item = ItemParser(data: data).parse(read.lines)
+        if Settings.autoGame, contexts.count > 1 {
+            let d = GameDetector(data: contexts.mapValues(\.data))
+                .decide(tooltip: read.lines, allLines: read.allLines, leagues: contexts.mapValues(\.knownLeagues), last: game,
+                        windowTitle: title)
+            Log.info("game: \(d.game.rawValue) (\(d.reason))")
+            if let l = d.league { Settings.setDetectedLeague(l, for: d.game) }
+            if d.game != game { use(d.game) }
+            model.gameReason = d.reason
+            item = d.item
+        }
+        return item
+    }
+
+    /// Title of the frontmost app's main window (GeForce NOW or the browser streaming it), logged so we can see
+    /// whether it ever names the game. Needs the Screen Recording grant the app already has.
+    static func frontWindowTitle() -> String? {
+        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+              let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
+        else { return nil }
+        let titles = info.filter { ($0[kCGWindowOwnerPID as String] as? pid_t) == pid && ($0[kCGWindowLayer as String] as? Int) == 0 }
+            .compactMap { $0[kCGWindowName as String] as? String }.filter { !$0.isEmpty }
+        Log.info("window titles: \(titles)")
+        return titles.first { GameDetector.game(inTitle: $0) != nil } ?? titles.first
     }
 
     /// Did the read produce names we actually know?
@@ -202,7 +297,16 @@ final class PriceCheckController {
         let ninja = self.ninja
         let snap = try? await withTimeout(10) { try await ninja.ensure(league: league) }
         Log.info(String(format: "price: ninja snapshot %@ in %.2fs", snap == nil ? "unavailable" : "ok", Date().timeIntervalSince(t0)))
-        model.exaltedPerDivine = snap?.exaltedPerDivine ?? 0
+        model.smallPerDivine = snap?.smallPerDivine(game) ?? 0
+
+        // White-text items poe.ninja knows (PoE 1 fragments, scarabs, cards) are priced like currency.
+        if item.rarity == .normal, item.mods.isEmpty, let n = item.name, let snap,
+           let p = await ninja.lookup(name: n, baseType: nil, corrupted: false) {
+            model.ninja = NinjaInfo(price: p, smallPerDivine: snap.smallPerDivine(game), stack: item.stackSize, fetched: snap.fetched)
+            Log.info(String(format: "ninja: %@ = %.4f div (%@)", p.name, p.divine, p.category))
+            model.phase = .done
+            return
+        }
 
         switch item.rarity {
         case .rare, .magic, .normal:
@@ -220,7 +324,7 @@ final class PriceCheckController {
             let name = item.name ?? item.baseType ?? ""
             if let p = await ninja.lookup(name: name, baseType: item.rarity == .unique ? item.baseType : nil, corrupted: item.corrupted),
                let snap {
-                model.ninja = NinjaInfo(price: p, exaltedPerDivine: snap.exaltedPerDivine, stack: item.stackSize, fetched: snap.fetched)
+                model.ninja = NinjaInfo(price: p, smallPerDivine: snap.smallPerDivine(game), stack: item.stackSize, fetched: snap.fetched)
                 Log.info(String(format: "ninja: %@ = %.4f div (%@)", p.name, p.divine, p.category))
                 model.phase = .done
                 model.canTradeSearch = item.rarity == .unique || item.rarity == .gem
@@ -276,7 +380,8 @@ final class PriceCheckController {
                     name: isUnique ? item.name : nil,
                     type: isUnique ? item.baseType : (item.baseType ?? item.name),
                     gemLevel: item.rarity == .gem ? item.gemLevel : nil,
-                    corrupted: item.corrupted, league: league, status: Settings.status, currencyRates: await rates())
+                    corrupted: item.corrupted, links: model.links, league: league, status: Settings.status,
+                    currencyRates: await rates())
                 Log.info("name search: total=\(r.total) prices=\(r.listings.prefix(5).map { "\(StatFilter.fmt($0.amount)) \($0.currency)" })")
                 model.result = r
                 model.phase = .done
@@ -285,6 +390,31 @@ final class PriceCheckController {
                 model.error = error.localizedDescription
             }
             model.searching = false
+        }
+    }
+
+    /// Links picked in the panel (PoE 1). Rare searches take them on the next Search; uniques re-price now.
+    private func linksChanged() {
+        guard let item = model.item else { return }
+        if model.search != nil {
+            model.search?.links = model.links
+            return
+        }
+        Task {
+            let name = item.name ?? item.baseType ?? ""
+            model.result = nil
+            if let snap = await ninja.snapshot,
+               let p = await ninja.lookup(name: name, baseType: item.rarity == .unique ? item.baseType : nil,
+                                          corrupted: item.corrupted, links: model.links),
+               model.links == nil || p.links == model.links {
+                model.ninja = NinjaInfo(price: p, smallPerDivine: snap.smallPerDivine(game), stack: item.stackSize, fetched: snap.fetched)
+                Log.info(String(format: "ninja (%@ links): %@ = %.4f div", model.links.map(String.init) ?? "no", p.name, p.divine))
+            } else {
+                // poe.ninja has no price for this link count: ask the trade site.
+                model.ninja = nil
+                model.canTradeSearch = true
+                runNameSearch()
+            }
         }
     }
 

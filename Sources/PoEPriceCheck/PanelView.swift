@@ -74,6 +74,7 @@ struct PanelView: View {
         }
         if let n = model.ninja { ninjaSection(n) }
         if model.search != nil { rareSection }
+        if model.ninja == nil, model.search == nil, model.showsLinks, model.result != nil || model.searching { linksPicker }
         if model.canTradeSearch && model.search == nil {
             HStack {
                 Button(model.searching ? "Searching…" : "Search trade listings") { model.onTradeSearch?() }
@@ -95,18 +96,40 @@ struct PanelView: View {
                 Text(model.format(divine: n.price.divine)).font(font(22, .bold))
                 Text("each").font(font(11)).foregroundStyle(.secondary)
                 Spacer()
-                if n.price.divine < 1, n.exaltedPerDivine > 0 {
+                if n.price.divine < 1, n.smallPerDivine > 0 {
                     Text(String(format: "%.4f div", n.price.divine)).font(font(11)).foregroundStyle(.secondary)
-                } else if n.exaltedPerDivine > 0 {
-                    Text(String(format: "%.0f ex", n.price.divine * n.exaltedPerDivine)).font(font(11)).foregroundStyle(.secondary)
+                } else if n.smallPerDivine > 0 {
+                    Text(String(format: "%.0f %@", n.price.divine * n.smallPerDivine, model.game.smallCurrencyShort))
+                        .font(font(11)).foregroundStyle(.secondary)
                 }
             }
             if let s = n.stack, s > 1 {
                 Text("Stack of \(s): \(model.format(divine: n.price.divine * Double(s)))").font(font(13, .medium))
             }
-            let vol = n.price.volume.map { n.price.category.hasPrefix("Unique") ? "\(Int($0)) listed" : String(format: "%.0f div/day volume", $0) } ?? ""
-            Text("poe.ninja · \(n.price.category) · \(vol) · \(PanelModel.age(n.fetched)) old")
+            let listed = n.price.category.hasPrefix("Unique") || model.game == .poe1 && n.price.links != nil
+            let vol = n.price.volume.map { listed ? "\(Int($0)) listed" : "\(model.format(divine: $0))/day volume" } ?? ""
+            let linked = n.price.links.map { "\($0)L · " } ?? ""
+            Text("poe.ninja · \(linked)\(n.price.category) · \(vol) · \(PanelModel.age(n.fetched)) old")
                 .font(font(10)).foregroundStyle(.secondary)
+            if model.showsLinks { linksPicker }
+        }
+    }
+
+    /// PoE 1: OCR can't see sockets, so the user says how many are linked.
+    private var linksPicker: some View {
+        HStack(spacing: 6 * z) {
+            Text("Links").font(font(11))
+            Picker("", selection: Binding(get: { model.links ?? 0 }, set: {
+                model.links = $0 == 0 ? nil : $0
+                model.onLinksChanged?()
+            })) {
+                Text("Any").tag(0)
+                Text("5L").tag(5)
+                Text("6L").tag(6)
+            }
+            .pickerStyle(.segmented).labelsHidden().frame(width: 150 * z)
+            .font(font(11))
+            Spacer()
         }
     }
 
@@ -132,7 +155,7 @@ struct PanelView: View {
                 Divider().overlay(Color.white.opacity(0.1))
                 if let cat = search.category {
                     Toggle(isOn: Binding(get: { !(model.search?.useBaseType ?? false) }, set: { model.search?.useBaseType = !$0 })) {
-                        Text("Any \(Self.categoryName(cat)) (off = \(search.baseType ?? "this base") only)").font(font(11))
+                        Text("Any \(Self.categoryName(cat, game: model.game)) (off = \(search.baseType ?? "this base") only)").font(font(11))
                     }.toggleStyle(.checkbox)
                 }
                 if let floor = search.itemLevelFloor {
@@ -143,6 +166,7 @@ struct PanelView: View {
                 Toggle(isOn: Binding(get: { model.search?.nonCorruptedOnly ?? false }, set: { model.search?.nonCorruptedOnly = $0 })) {
                     Text("Non-corrupted only").font(font(11))
                 }.toggleStyle(.checkbox)
+                if model.showsLinks { linksPicker }
                 HStack(spacing: 6 * z) {
                     Text("Min values").font(font(11))
                     Button("−") { adjustMargin(-0.05) }.font(font(11))
@@ -172,10 +196,14 @@ struct PanelView: View {
         model.search = s
     }
 
-    static func categoryName(_ c: String) -> String {
+    static func categoryName(_ c: String, game: Game = .poe2) -> String {
         let last = c.split(separator: ".").last.map(String.init) ?? c
         let names = ["chest": "body armour", "onemace": "one-hand mace", "twomace": "two-hand mace", "onesword": "one-hand sword",
-                     "twosword": "two-hand sword", "oneaxe": "one-hand axe", "twoaxe": "two-hand axe", "warstaff": "quarterstaff"]
+                     "twosword": "two-hand sword", "oneaxe": "one-hand axe", "twoaxe": "two-hand axe",
+                     "warstaff": game == .poe1 ? "warstaff" : "quarterstaff",
+                     "basesword": "one-hand sword", "basemace": "one-hand mace", "basedagger": "dagger", "basestaff": "staff",
+                     "runedagger": "rune dagger", "rapier": "thrusting sword", "base": "jewel", "abyss": "abyss jewel",
+                     "cluster": "cluster jewel", "trinket": "trinket", "rod": "fishing rod"]
         return names[last] ?? last
     }
 
@@ -202,7 +230,8 @@ struct PanelView: View {
                     HStack {
                         Text("\(StatFilter.fmtValue(l.amount)) \(PanelModel.shortCurrency(l.currency))").font(font(12, .medium))
                             .frame(width: 110 * z, alignment: .leading)
-                        if let d = l.divine, l.currency != "divine" {
+                        // Converted price, unless it would just repeat the listing (divine, or chaos/exalted below 1 div).
+                        if let d = l.divine, l.currency != "divine", !(l.currency == model.game.smallCurrency && d < 1) {
                             Text("≈ \(model.format(divine: d))").font(font(10)).foregroundStyle(.secondary)
                         }
                         Spacer()
@@ -218,7 +247,9 @@ struct PanelView: View {
 
     private var footer: some View {
         HStack {
-            Text(model.league.isEmpty ? " " : model.league).font(font(10)).foregroundStyle(.secondary)
+            let game = (model.game == .poe1 ? "PoE 1" : "PoE 2") + (model.autoGame ? " (auto)" : "")
+            Text(model.league.isEmpty ? game : "\(game) · \(model.league)").font(font(10)).foregroundStyle(.secondary)
+                .help(model.gameReason)
             Spacer()
             Text("Esc to close").font(font(10)).foregroundStyle(.secondary)
         }

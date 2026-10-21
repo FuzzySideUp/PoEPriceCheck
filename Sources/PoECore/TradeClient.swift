@@ -17,32 +17,33 @@ public struct TradeResult: Sendable {
     public let listings: [TradeListing]
     public let search: RareSearch?
     public let league: String
+    public var game: Game = .poe2
 
-    public var webURL: URL {
-        let l = league.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? league
-        return URL(string: "https://www.pathofexile.com/trade2/search/poe2/\(l)/\(queryId)")!
-    }
+    public var webURL: URL { game.webURL(league: league, queryId: queryId) }
 }
 
-/// Official PoE 2 trade API (pathofexile.com/api/trade2), rate limited per GGG headers.
+/// Official trade API (pathofexile.com/api/trade for PoE 1, api/trade2 for PoE 2), rate limited per GGG headers.
 public actor TradeClient {
+    public let game: Game
     private let session: URLSession
     private let userAgent: String
     public let limiter = RateLimiter(defaults: [
         "trade-search-request-limit": "5:10:60,15:60:300,30:300:1800",
         "trade-fetch-request-limit": "12:4:10,16:12:300",
     ])
-    private static let base = "https://www.pathofexile.com/api/trade2"
+    private var base: String { game.tradeAPI }
 
-    public init(userAgent: String, session: URLSession = .shared) {
+    public init(userAgent: String, game: Game = .poe2, session: URLSession = .shared) {
+        self.game = game
         self.userAgent = userAgent
         self.session = session
     }
 
     public func leagues() async throws -> [String] {
         struct R: Decodable { struct L: Decodable { let id: String; let realm: String? }; let result: [L] }
-        let (data, _) = try await request(URL(string: "\(Self.base)/data/leagues")!, policy: nil)
-        return try JSONDecoder().decode(R.self, from: data).result.filter { ($0.realm ?? "poe2") == "poe2" }.map(\.id)
+        let (data, _) = try await request(URL(string: "\(base)/data/leagues")!, policy: nil)
+        let realm = game.leagueRealm
+        return try JSONDecoder().decode(R.self, from: data).result.filter { ($0.realm ?? realm) == realm }.map(\.id)
     }
 
     /// Runs `search`, auto-relaxing (when allowed) until at least `target` results or nothing left to relax.
@@ -58,22 +59,24 @@ public actor TradeClient {
                 continue
             }
             let listings = try await fetch(Array(ids.prefix(10)), queryId: id, rates: currencyRates)
-            return TradeResult(queryId: id, total: total, listings: listings, search: current, league: league)
+            return TradeResult(queryId: id, total: total, listings: listings, search: current, league: league, game: game)
         }
     }
 
     /// Plain search by unique name / base type (uniques, gems, anything poe.ninja lacks).
-    public func priceByName(name: String?, type: String?, gemLevel: Int?, corrupted: Bool, league: String,
+    public func priceByName(name: String?, type: String?, gemLevel: Int?, corrupted: Bool, links: Int? = nil, league: String,
                             status: String, currencyRates: [String: Double]) async throws -> TradeResult {
         var misc: [String: Any] = ["corrupted": ["option": corrupted ? "true" : "false"]]
         if let g = gemLevel { misc["gem_level"] = ["min": g] }
+        var filters: [String: Any] = ["misc_filters": ["filters": misc]]
+        if let links { filters["socket_filters"] = ["filters": ["links": ["min": links]]] }
         var query: [String: Any] = ["status": ["option": status], "stats": [["type": "and", "filters": []]],
-                                    "filters": ["misc_filters": ["filters": misc]]]
+                                    "filters": filters]
         if let name { query["name"] = name }
         if let type { query["type"] = type }
         let (id, total, ids) = try await runSearch(["query": query, "sort": ["price": "asc"]], league: league)
         let listings = try await fetch(Array(ids.prefix(10)), queryId: id, rates: currencyRates)
-        return TradeResult(queryId: id, total: total, listings: listings, search: nil, league: league)
+        return TradeResult(queryId: id, total: total, listings: listings, search: nil, league: league, game: game)
     }
 
     func runSearch(_ search: RareSearch, league: String) async throws -> (String, Int, [String]) {
@@ -81,9 +84,8 @@ public actor TradeClient {
     }
 
     func runSearch(_ json: [String: Any], league: String) async throws -> (String, Int, [String]) {
-        let l = league.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? league
         let body = try JSONSerialization.data(withJSONObject: json)
-        let (data, _) = try await request(URL(string: "\(Self.base)/search/poe2/\(l)")!, policy: "trade-search-request-limit", body: body)
+        let (data, _) = try await request(game.searchURL(league: league), policy: "trade-search-request-limit", body: body)
         struct R: Decodable { let id: String; let total: Int?; let result: [String] }
         let r = try JSONDecoder().decode(R.self, from: data)
         return (r.id, r.total ?? r.result.count, r.result)
@@ -91,7 +93,8 @@ public actor TradeClient {
 
     func fetch(_ ids: [String], queryId: String, rates: [String: Double]) async throws -> [TradeListing] {
         guard !ids.isEmpty else { return [] }
-        let url = URL(string: "\(Self.base)/fetch/\(ids.joined(separator: ","))?query=\(queryId)&realm=poe2")!
+        let realm = game.realm.map { "&realm=\($0)" } ?? ""
+        let url = URL(string: "\(base)/fetch/\(ids.joined(separator: ","))?query=\(queryId)\(realm)")!
         let (data, _) = try await request(url, policy: "trade-fetch-request-limit")
         struct R: Decodable {
             struct Entry: Decodable {

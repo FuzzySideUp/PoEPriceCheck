@@ -18,6 +18,7 @@ public struct StatMatch: Sendable, Equatable {
 
 /// Static game/trade data: base types, unique names, trade stat templates.
 public final class GameData: @unchecked Sendable {
+    public let game: Game
     public let baseCategories: [String: String]
     public let uniqueBases: [String: [String]]      // unique name -> base types
     public let gemNames: Set<String>
@@ -30,7 +31,8 @@ public final class GameData: @unchecked Sendable {
     private let normalizedBases: [String: String]   // normalized -> real name
     private let normalizedUniques: [String: String]
 
-    public init(directory: URL) throws {
+    public init(directory: URL, game: Game = .poe2) throws {
+        self.game = game
         let dec = JSONDecoder()
         baseCategories = try dec.decode([String: String].self, from: Data(contentsOf: directory.appendingPathComponent("base_items.json")))
 
@@ -51,6 +53,10 @@ public final class GameData: @unchecked Sendable {
                 if let n = e.name, e.flags?["unique"] == true { uniques[n, default: []].append(e.type) }
                 if g.id == "gem" { gems.insert(e.type) }
                 if g.id == "currency" { currency.insert(e.type) }
+                // PoE 1: divination cards and fragments/scarabs are priced like currency (poe.ninja exchange).
+                if game == .poe1, e.name == nil, g.id == "card" || (g.id == "map" && !e.type.hasSuffix(" Map")) {
+                    currency.insert(e.type)
+                }
                 if e.name == nil { allTypes.insert(e.type) }
             }
         }

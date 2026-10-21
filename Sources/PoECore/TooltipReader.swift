@@ -100,9 +100,11 @@ public enum TooltipReader {
             var s = Double(c.lines.count)
             let text = c.lines.map { $0.text.lowercased() }.joined(separator: "\n")
             for k in keywords where text.contains(k) { s += 2 }
-            // Tooltips start with a coloured name (rare/unique/magic/currency/gem).
+            // Tooltips start with a coloured name (rare/unique/magic/currency/gem), possibly in a brighter
+            // header frame just above the cluster.
             if let top = c.lines.min(by: { $0.rect.minY < $1.rect.minY }),
-               [.rare, .unique, .magic, .currency, .gem].contains(top.color) { s += 4 }
+               [.rare, .unique, .magic, .currency, .gem].contains(top.color)
+                || headerLines(above: c.lines, centerX: c.cx, in: usable).contains(where: { $0.color != .white }) { s += 4 }
             if c.lines.count >= 2, c.lines.contains(where: { $0.color == .magic }) { s += 2 }
             // Stacks of short labels (stash tab names, UI buttons) look like tooltips but aren't.
             let avgLetters = Double(c.lines.map { $0.text.filter(\.isLetter).count }.reduce(0, +)) / Double(c.lines.count)
@@ -130,7 +132,24 @@ public enum TooltipReader {
                 print(String(format: "cluster %.1f cx=%.0f n=%d: ", score(c), c.cx, c.lines.count) + c.lines.prefix(4).map { "[\($0.color.rawValue)] \($0.text)" }.joined(separator: " / "))
             }
         }
-        guard let best = clusters.filter({ $0.lines.count >= 1 }).max(by: { score($0) < score($1) }) else { return [] }
+        guard var best = clusters.filter({ $0.lines.count >= 1 }).max(by: { score($0) < score($1) }) else { return [] }
+
+        // Hovering an item can also show the equipped item's tooltip beside it (PoE 1 comparisons, socketed
+        // gems). Both are full tooltips at the same height; the hovered one is the one nearer the cursor.
+        if let cursor {
+            func rect(_ c: Cluster) -> CGRect { c.lines.reduce(CGRect.null) { $0.union($1.rect) } }
+            func dist(_ c: Cluster) -> CGFloat {
+                let r = rect(c)
+                return hypot(max(r.minX - cursor.x, 0, cursor.x - r.maxX), max(r.minY - cursor.y, 0, cursor.y - r.maxY))
+            }
+            let b = rect(best)
+            let sideBySide = clusters.filter { c in
+                let r = rect(c)
+                return c.lines.count >= 4 && score(c) >= max(6, 0.4 * score(best)) && dist(c) + 200 < dist(best)
+                    && r.minY < b.maxY && b.minY < r.maxY && (r.maxX <= b.minX + 20 || r.minX >= b.maxX - 20)
+            }
+            if let near = sideBySide.min(by: { dist($0) < dist($1) }) { best = near }
+        }
 
         // Pull in fragments Vision split off the same row (e.g. "Armour:" and "412"),
         // and lines in the tooltip's vertical span that are centred slightly off.
@@ -146,17 +165,31 @@ public enum TooltipReader {
                   l.rect.minX >= span.minX - span.width * 0.15, l.rect.maxX <= span.maxX + span.width * 0.15 else { continue }
             extra.append(l)
         }
-        // The item name sits in the header frame, which can be lighter than the body. Keep a coloured,
-        // centred line hugging the top of the tooltip even if its background is a bit brighter.
-        if let top = best.lines.min(by: { $0.rect.minY < $1.rect.minY }) {
-            let above = usable.filter { l in
-                let gap = top.rect.minY - l.rect.maxY
-                return gap >= -2 && gap < 0.8 * top.rect.height && abs(l.rect.midX - best.cx) < max(14, 1.1 * l.rect.height)
-                    && (l.background ?? 0) <= 70 && [.rare, .unique, .magic, .currency, .gem, .white].contains(l.color)
-            }
-            if let nameLine = above.max(by: { $0.rect.minY < $1.rect.minY }), !extra.contains(nameLine) { extra.append(nameLine) }
-        }
+        for l in headerLines(above: best.lines, centerX: best.cx, in: usable) where !extra.contains(l) { extra.append(l) }
         return mergeRows(best.lines, extras: extra, centerX: best.cx)
+    }
+
+    /// The item name sits in the header frame, which can be lighter than the body (PoE 2 headers measure up to
+    /// ~60 over bright scenes, PoE 1 frames 52-79) and holds up to two lines (name + base), with the frame's
+    /// lower border between it and the body. Returns the coloured, centred lines hugging the top of `members`.
+    static func headerLines(above members: [OCRLine], centerX: CGFloat, in usable: [OCRLine]) -> [OCRLine] {
+        guard var anchor = members.min(by: { $0.rect.minY < $1.rect.minY }) else { return [] }
+        // The frame border gap only applies between the body and the header: a coloured top line is already
+        // in the header, and lines further above it must sit tight.
+        let topIsName = [.rare, .unique, .magic, .currency, .gem].contains(anchor.color)
+        var out: [OCRLine] = []
+        for step in 0..<2 {
+            let above = usable.filter { l in
+                let gap = anchor.rect.minY - l.rect.maxY
+                return gap >= -2 && gap < (step == 0 && !topIsName ? 1.3 : 0.8) * anchor.rect.height
+                    && abs(l.rect.midX - centerX) < max(14, 1.1 * l.rect.height)
+                    && (l.background ?? 0) <= 95 && [.rare, .unique, .magic, .currency, .gem, .white].contains(l.color)
+            }
+            guard let nameLine = above.max(by: { $0.rect.minY < $1.rect.minY }), !members.contains(nameLine) else { break }
+            out.append(nameLine)
+            anchor = nameLine
+        }
+        return out
     }
 
     /// Merges OCR boxes that sit on the same text row into one line, left to right.
