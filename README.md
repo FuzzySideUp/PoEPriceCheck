@@ -58,9 +58,16 @@ clicks to the game.
    tolerates OCR typos.
 5. If a frame looks smeared by video compression, it re-captures once.
 
+## Download
+
+Get `PoEPriceCheck-<version>-macOS.zip` from the [latest release](https://github.com/FuzzySideUp/PoEPriceCheck/releases/latest)
+(macOS 14+, universal binary), unzip it and move `PoEPriceCheck.app` to Applications. The app isn't
+notarized, so on first launch right-click it › Open › Open. Then grant the two permissions listed under
+Install below.
+
 ## Install
 
-Requirements: macOS 14+ on Apple Silicon (built and tested on an M4 at 3840×2160), Xcode 15+ / Swift 5.10+.
+To build it yourself instead: macOS 14+ on Apple Silicon (built and tested on an M4 at 3840×2160), Xcode 15+ / Swift 5.10+.
 
 ```bash
 git clone https://github.com/FuzzySideUp/PoEPriceCheck.git
