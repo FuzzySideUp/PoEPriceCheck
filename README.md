@@ -98,6 +98,11 @@ Early and PoE 2 only. Tested on one 4K display at 1× scaling. Other resolutions
 detection thresholds were tuned on 4K captures. PoE 1 support (poe.ninja + `api/trade`) is a natural next
 step.
 
+## License
+
+MIT. See [LICENSE](LICENSE). Game data in `Data/` and the screenshots in `Fixtures/` and `docs/` show
+Path of Exile content, which belongs to Grinding Gear Games.
+
 ## Disclaimer
 
 Unofficial fan project, not affiliated with or endorsed by Grinding Gear Games or NVIDIA. Price data
