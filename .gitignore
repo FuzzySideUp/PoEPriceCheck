@@ -1,0 +1,7 @@
+.build/
+.cache/
+.swiftpm/
+build/
+*.xcodeproj
+scripts/local.env
+.DS_Store
