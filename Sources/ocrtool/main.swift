@@ -40,7 +40,7 @@ if gameArg == "auto" { print("--- game: \(game.rawValue) (\(decision.reason))") 
 let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
 var printable = item; printable.rawLines = []
 print("--- parsed"); print(String(data: try enc.encode(printable), encoding: .utf8)!)
-if item.rarity == .rare || item.rarity == .magic {
+if [.rare, .magic, .normal].contains(item.rarity) {
     let s = RareQueryBuilder(data: data).build(item)
     print("--- rare search")
     for f in s.filters { print("\(f.enabled ? "[x]" : "[ ]") w\(f.weight) \(f.display(margin: s.margin))   <- \(f.sources)") }

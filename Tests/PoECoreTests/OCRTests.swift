@@ -76,6 +76,8 @@ final class FixtureOCRTests: XCTestCase {
         try XCTSkipIf(cases.isEmpty, "no real fixtures yet")
         for exp in cases.sorted(by: { $0.path < $1.path }) {
             let name = exp.lastPathComponent.replacingOccurrences(of: ".expected.json", with: "")
+            // POE_FIXTURE=<name prefix> runs just those fixtures.
+            if let only = ProcessInfo.processInfo.environment["POE_FIXTURE"], !name.hasPrefix(only) { continue }
             let image = ["jpg", "png"].lazy.compactMap { TestData.loadImage(dir.appendingPathComponent("\(name).\($0)")) }.first
             guard let image else { XCTFail("missing image for \(name)"); continue }
             let e = try JSONDecoder().decode(Expected.self, from: Data(contentsOf: exp))

@@ -161,6 +161,11 @@ public struct ItemParser {
             if data.currencyNames.contains(b) { rarity = .currency }
             else if data.gemNames.contains(b) { rarity = .gem }
         }
+        // PoE 2 skill tooltips: name, then "Spell" and the tags, in mixed colours.
+        if rarity != .rare, rarity != .unique, let b = data.matchBase(first), data.gemNames.contains(b),
+           texts.count == 1 || data.matchBase(texts[1]).flatMap({ data.category(forBase: $0) }) == nil {
+            rarity = .gem
+        }
         // Two-line header whose second line is an equipment base: rare or unique whatever the colour said
         // (dimmed/semi-transparent tooltips can sample as currency or grey).
         if rarity != .rare, rarity != .unique, texts.count >= 2, let b = data.matchBase(texts[1]),
@@ -257,7 +262,8 @@ public struct ItemParser {
             return true
         }
         if item.rarity == .gem, lower.hasPrefix("level") {
-            item.gemLevel = TextUtil.numbers(in: text).first.map { Int($0) }
+            // The first "Level:" is the gem's; later ones are stray labels merged into other rows.
+            if item.gemLevel == nil { item.gemLevel = TextUtil.numbers(in: text).first.map { Int($0) } }
             return true
         }
         if lower.hasPrefix("requires") || lower.hasPrefix("right click") || lower.hasPrefix("place into")

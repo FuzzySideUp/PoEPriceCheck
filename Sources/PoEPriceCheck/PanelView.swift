@@ -144,7 +144,7 @@ struct PanelView: View {
                         HStack {
                             Text(f.display(margin: search.margin)).font(font(12)).foregroundStyle(f.enabled ? .primary : .secondary)
                             Spacer()
-                            Text(StatFilter.fmtValue(f.rolled)).font(font(10)).foregroundStyle(.secondary)
+                            if !f.valueless { Text(StatFilter.fmtValue(f.rolled)).font(font(10)).foregroundStyle(.secondary) }
                         }
                     }
                     .toggleStyle(.checkbox)
@@ -235,7 +235,7 @@ struct PanelView: View {
                             Text("≈ \(model.format(divine: d))").font(font(10)).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        if let ilvl = l.itemLevel { Text("i\(ilvl)").font(font(10)).foregroundStyle(.secondary) }
+                        if let ilvl = l.itemLevel, ilvl > 0 { Text("i\(ilvl)").font(font(10)).foregroundStyle(.secondary) }
                         Text(PanelModel.age(l.indexed)).font(font(10)).foregroundStyle(.secondary).frame(width: 34 * z, alignment: .trailing)
                     }
                 }

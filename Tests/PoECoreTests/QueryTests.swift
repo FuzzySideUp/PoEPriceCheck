@@ -113,3 +113,65 @@ final class RateLimiterTests: XCTestCase {
         XCTAssertGreaterThan(blocked, 25)
     }
 }
+
+final class AnointTests: XCTestCase {
+    func filterJSON(_ s: RareSearch) throws -> String {
+        String(data: try JSONSerialization.data(withJSONObject: s.queryJSON(), options: .sortedKeys), encoding: .utf8)!
+    }
+
+    func testPoE2AnointedAmulet() throws {
+        var lines = TestData.lines("""
+        Twisted Amulet
+        --------
+        Amulet
+        --------
+        Allocates Flip the Script
+        Allocates Easy Target
+        --------
+        -1 Prefix Modifier allowed
+        """)
+        lines[0].color = .white
+        lines[4].color = .enchant   // second anoint left uncoloured: amulet anoints are enchants regardless
+        let item = TestData.parser.parse(lines)
+        XCTAssertEqual(item.rarity, .normal)
+        let s = RareQueryBuilder(data: TestData.gameData).build(item)
+        let anoints = s.filters.filter(\.valueless)
+        XCTAssertEqual(anoints.map(\.label), ["Allocates Easy Target", "Allocates Flip the Script"])
+        XCTAssertTrue(anoints.allSatisfy(\.enabled))
+        XCTAssertEqual(anoints.first?.display(margin: 0.1), "Allocates Easy Target")
+        let json = try filterJSON(s)
+        XCTAssertTrue(json.contains("{\"id\":\"enchant.stat_2954116742|4985\"}"), json)
+        XCTAssertTrue(json.contains("{\"id\":\"enchant.stat_2954116742|64525\"}"), json)
+
+        // Relaxing never widens the margin for anoints, which have no value to widen.
+        var r = s
+        var notes: [String] = []
+        while let next = r.relaxed() { r = next; notes = r.relaxNotes }
+        XCTAssertFalse(notes.contains { $0.contains("margin") }, "\(notes)")
+    }
+
+    func testPoE1AnointOnRareAmulet() throws {
+        var lines = TestData.lines("""
+        Gale Charm
+        Onyx Amulet
+        --------
+        Requires Level 60
+        --------
+        Allocates Whispers of Doom
+        --------
+        +16 to all Attributes
+        --------
+        +90 to maximum Life
+        +40% to Fire Resistance
+        """)
+        lines[0].color = .rare; lines[1].color = .rare
+        lines[5].color = .enchant
+        let item = TestData.poe1Parser.parse(lines)
+        let s = RareQueryBuilder(data: TestData.poe1Data).build(item)
+        let anoint = try XCTUnwrap(s.filters.first(where: \.valueless))
+        XCTAssertEqual(anoint.label, "Allocates Whispers of Doom")
+        XCTAssertTrue(anoint.enabled)
+        guard case let .stat(id) = anoint.target else { return XCTFail("not a stat") }
+        XCTAssertTrue(id.hasPrefix("enchant.stat_2954116742|"), id)
+    }
+}

@@ -42,12 +42,51 @@ public enum TooltipReader {
         return nil
     }
 
+    /// Where Vision runs text recognition. The GPU by default: Vision would pick the Neural Engine, but when
+    /// macOS's Neural Engine service breaks (seen: ANECompilerService stuck for a day) every request fails with an
+    /// e5rt error, or hangs and blocks Vision's queue for later requests too. The GPU reads a 4K frame in ~0.3 s;
+    /// the CPU (~45 s) is the last resort. POE_OCR_DEVICE=ane|gpu|cpu overrides.
+    public enum Engine: Int, Sendable, Comparable {
+        case neuralEngine, gpu, cpu
+        public static func < (a: Engine, b: Engine) -> Bool { a.rawValue < b.rawValue }
+    }
+    public static var engine: Engine { fallback.engine }
+    /// Why recognition moved to a slower engine, for the log.
+    public static var fallbackReason: String? { fallback.reason }
+    private static let fallback = Fallback(forced: ProcessInfo.processInfo.environment["POE_OCR_DEVICE"])
+
     public static func recognize(_ image: CGImage) throws -> [OCRLine] {
+        while true {
+            let engine = fallback.engine
+            do { return try perform(makeRequest(engine), on: image) }
+            catch {
+                guard engine != .cpu else { throw error }
+                fallback.move(past: engine, "\(engine): \(error)")
+            }
+        }
+    }
+
+    private static func makeRequest(_ engine: Engine) -> VNRecognizeTextRequest {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = true
         request.recognitionLanguages = ["en-US"]
         request.minimumTextHeight = 0.006
+        guard engine != .neuralEngine, let stages = try? request.supportedComputeStageDevices else { return request }
+        for (stage, devices) in stages {
+            let device = devices.first { d in
+                switch d {
+                case .gpu: return engine == .gpu
+                case .cpu: return engine == .cpu
+                default: return false
+                }
+            }
+            if let device { request.setComputeDevice(device, for: stage) }
+        }
+        return request
+    }
+
+    private static func perform(_ request: VNRecognizeTextRequest, on image: CGImage) throws -> [OCRLine] {
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
         try handler.perform([request])
         let w = CGFloat(image.width), h = CGFloat(image.height)
@@ -56,6 +95,24 @@ public enum TooltipReader {
             let bb = obs.boundingBox
             let rect = CGRect(x: bb.minX * w, y: (1 - bb.maxY) * h, width: bb.width * w, height: bb.height * h)
             return OCRLine(text: cand.string, rect: rect, color: .other, confidence: cand.confidence)
+        }
+    }
+
+    private final class Fallback: @unchecked Sendable {
+        private let lock = NSLock()
+        private var current: Engine
+        private(set) var reason: String?
+        init(forced: String?) {
+            current = forced == "cpu" ? .cpu : forced == "ane" ? .neuralEngine : .gpu
+            reason = forced.map { "POE_OCR_DEVICE=\($0)" }
+        }
+        var engine: Engine { lock.withLock { current } }
+        func move(past failed: Engine, _ why: String) {
+            lock.withLock {
+                guard current <= failed, let next = Engine(rawValue: failed.rawValue + 1) else { return }
+                current = next
+                reason = why
+            }
         }
     }
 
@@ -166,7 +223,9 @@ public enum TooltipReader {
             extra.append(l)
         }
         for l in headerLines(above: best.lines, centerX: best.cx, in: usable) where !extra.contains(l) { extra.append(l) }
-        return mergeRows(best.lines, extras: extra, centerX: best.cx)
+        // Left-aligned header lines aren't centred, so they join as members rather than extras.
+        let skillHeader = leftAlignedHeader(above: best.lines, in: usable, isDark: isDark)
+        return mergeRows(best.lines + skillHeader, extras: extra.filter { !skillHeader.contains($0) }, centerX: best.cx)
     }
 
     /// The item name sits in the header frame, which can be lighter than the body (PoE 2 headers measure up to
@@ -189,6 +248,38 @@ public enum TooltipReader {
             out.append(nameLine)
             anchor = nameLine
         }
+        return out
+    }
+
+    /// PoE 2 skill gem tooltips put the name, tags, level and cost left-aligned above the centred description,
+    /// which is all the centre-aligned search finds. Returns that stack: dark-panel lines directly above
+    /// `members`, inside the tooltip's width, at least three of them sharing a left edge, with a skill's
+    /// "Level:" line and a "Cost:" or "Requires:" line (stash and inventory labels above item tooltips have neither).
+    static func leftAlignedHeader(above members: [OCRLine], in usable: [OCRLine], isDark: (OCRLine) -> Bool) -> [OCRLine] {
+        guard let top = members.min(by: { $0.rect.minY < $1.rect.minY }) else { return [] }
+        let span = members.reduce(CGRect.null) { $0.union($1.rect) }
+        let heights = members.map(\.rect.height).sorted()
+        let h = heights[heights.count / 2]
+        let candidates = usable.filter { l in
+            // The name is in a larger font; the "GAME PAUSED" watermark behind it reads uncoloured.
+            l.rect.maxY <= top.rect.minY + 2 && isDark(l) && !members.contains(l) && l.rect.height < 1.7 * h && l.color != .other
+                && l.rect.minX >= span.minX - 0.25 * span.width && l.rect.minX < span.midX - 0.1 * span.width
+                && l.rect.maxX <= span.maxX + 20
+        }.sorted { $0.rect.minY > $1.rect.minY }
+        var out: [OCRLine] = []
+        var edge = top.rect.minY
+        for l in candidates {
+            if edge - l.rect.maxY > 1.6 * h { break }
+            out.append(l)
+            edge = min(edge, l.rect.minY)
+        }
+        let lefts = out.map(\.rect.minX).sorted()
+        guard lefts.count >= 3 else { return [] }
+        let median = lefts[lefts.count / 2]
+        guard lefts.filter({ abs($0 - median) < 12 }).count >= 3 else { return [] }
+        let texts = out.map { TextUtil.clean($0.text).lowercased() }
+        guard texts.contains(where: { $0.hasPrefix("level") }),
+              texts.contains(where: { $0.hasPrefix("cost") || $0.contains("requires") }) else { return [] }
         return out
     }
 

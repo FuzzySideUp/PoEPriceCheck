@@ -13,6 +13,8 @@ public struct StatFilter: Identifiable, Sendable, Equatable {
     public var weight: Int            // higher = more important to value
     public var enabled: Bool
     public var sources: [String]      // tooltip lines that fed this filter
+    /// Stats without a number, such as anoints ("Allocates Flip the Script"): searched by id alone.
+    public var valueless = false
 
     public func minValue(margin: Double) -> Double {
         // Small whole numbers (+2 skill levels, 3 charm slots) aren't shaved: 4 -> 3.6 would mean 3.
@@ -22,6 +24,7 @@ public struct StatFilter: Identifiable, Sendable, Equatable {
     }
 
     public func display(margin: Double) -> String {
+        if valueless { return label }
         let v = Self.fmt(minValue(margin: margin)) + "+"
         // "Adds # to # Fire Damage" is searched by its average.
         if label.contains("# to #") {
@@ -60,6 +63,7 @@ public struct RareSearch: Sendable, Equatable {
         var propertyGroups: [String: [String: Any]] = [:]
         for f in filters where f.enabled {
             switch f.target {
+            case let .stat(id) where f.valueless: statFilters.append(["id": id])
             case let .stat(id): statFilters.append(["id": id, "value": ["min": f.minValue(margin: margin)]])
             case let .equipment(key): propertyGroups[game.propertyFilterGroup(key), default: [:]][key] = ["min": f.minValue(margin: margin)]
             }
@@ -100,7 +104,9 @@ public struct RareSearch: Sendable, Equatable {
             s.relaxNotes.append("any \(s.category!) base")
             return s
         }
-        if s.margin < 0.2 {
+        // A wider margin only helps filters with a value (not anoints).
+        let hasValues = s.filters.contains { $0.enabled && !$0.valueless }
+        if hasValues, s.margin < 0.2 {
             s.margin = 0.2
             s.relaxNotes.append("margin widened to 20%")
             return s
@@ -115,7 +121,7 @@ public struct RareSearch: Sendable, Equatable {
             s.relaxNotes.append("dropped \(s.filters[idx].label)")
             return s
         }
-        if s.margin < 0.35 {
+        if hasValues, s.margin < 0.35 {
             s.margin = 0.35
             s.relaxNotes.append("margin widened to 35%")
             return s
@@ -192,6 +198,15 @@ public struct RareQueryBuilder {
                 continue
             }
 
+            // Anoints ("Allocates Flip the Script") carry no number: the passive is the whole stat, and it's
+            // usually what the item is worth.
+            if values.isEmpty, key.hasPrefix("allocates ") {
+                // On amulets it's an enchant (anoint) even when OCR missed the colour.
+                let anoint = cat == "accessory.amulet" ? data.pick(match.stats, kind: .enchant, preferLocal: false) ?? stat : stat
+                filters.append(StatFilter(label: anoint.text, target: .stat(anoint.id), rolled: 0, weight: 8, enabled: false,
+                                          sources: [mod.text], valueless: true))
+                continue
+            }
             guard avg > 0 else { continue }
             let w = Self.weight(key, isWeapon: isWeapon, local: stat.isLocal)
             filters.append(StatFilter(label: stat.text.replacingOccurrences(of: " (Local)", with: ""),

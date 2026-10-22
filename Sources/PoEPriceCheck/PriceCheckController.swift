@@ -119,7 +119,8 @@ final class PriceCheckController {
             let ctx = CGContext(data: nil, width: 64, height: 32, bitsPerComponent: 8, bytesPerRow: 0,
                                 space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
             if let img = ctx?.makeImage() { _ = try? TooltipReader.recognize(img) }
-            Log.info(String(format: "warmUp: Vision ready in %.1fs", Date().timeIntervalSince(t0)))
+            Log.info(String(format: "warmUp: Vision ready in %.1fs", Date().timeIntervalSince(t0))
+                     + (TooltipReader.fallbackReason.map { " on \(TooltipReader.engine) (\($0))" } ?? ""))
         }
     }
 
@@ -241,7 +242,8 @@ final class PriceCheckController {
         let read = try await Task.detached(priority: .userInitiated) {
             try TooltipReader.read(image: image, cursor: cursor)
         }.value
-        Log.info(String(format: "ocr %.2fs: %d lines total, %d in tooltip %@", read.ocrSeconds, read.allLines.count, read.lines.count, "\(read.tooltipRect)"))
+        Log.info(String(format: "ocr %.2fs%@: %d lines total, %d in tooltip %@", read.ocrSeconds,
+                        TooltipReader.engine == .neuralEngine ? "" : " (\(TooltipReader.engine))", read.allLines.count, read.lines.count, "\(read.tooltipRect)"))
         let item = parse(read, windowTitle: Self.frontWindowTitle())
         Log.info("parsed: rarity=\(item.rarity) name=\(item.name ?? "-") base=\(item.baseType ?? "-") ilvl=\(item.itemLevel.map(String.init) ?? "-") mods=\(item.mods.count)")
         return (capture, read, item)
@@ -311,9 +313,9 @@ final class PriceCheckController {
         switch item.rarity {
         case .rare, .magic, .normal:
             if item.unidentified || item.rarity == .normal {
-                // Base + item level search.
+                // Base + item level search, plus any anoints (an anointed normal amulet is priced by them).
                 var s = RareQueryBuilder(data: data, margin: Settings.margin, status: Settings.status).build(item)
-                s.filters = []
+                s.filters = item.unidentified ? [] : s.filters.filter(\.valueless).map { var f = $0; f.enabled = true; return f }
                 s.useBaseType = true
                 model.search = s
             } else {
