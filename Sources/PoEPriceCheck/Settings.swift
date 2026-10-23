@@ -61,6 +61,12 @@ enum Settings {
         set { d.set(newValue, forKey: "status") }
     }
 
+    /// Open the app when you log in (see LoginItem).
+    static var openAtLogin: Bool {
+        get { d.bool(forKey: "openAtLogin") }
+        set { d.set(newValue, forKey: "openAtLogin") }
+    }
+
     static var saveCaptures: Bool {
         get { d.bool(forKey: "saveCaptures") }
         set { d.set(newValue, forKey: "saveCaptures") }

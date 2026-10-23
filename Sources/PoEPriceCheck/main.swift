@@ -45,6 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                                             name: Notification.Name("PoEPriceCheck.check"),
                                                             object: nil, suspensionBehavior: .deliverImmediately)
         controller.warmUp()
+        LoginItem.sync()
         if CommandLine.arguments.contains("--selftest") { controller.selfTest() }
     }
 
@@ -142,6 +143,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }))
 
         menu.addItem(.separator())
+        let login = NSMenuItem(title: "Open at Login", action: #selector(toggleLogin), keyEquivalent: "")
+        login.state = LoginItem.isEnabled ? .on : .off
+        login.target = self
+        menu.addItem(login)
         let save = NSMenuItem(title: "Save captures (for debugging)", action: #selector(toggleSave), keyEquivalent: "")
         save.state = Settings.saveCaptures ? .on : .off
         save.target = self
@@ -195,6 +200,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func toggleSave() { Settings.saveCaptures.toggle() }
+    @objc private func toggleLogin() { LoginItem.set(!LoginItem.isEnabled) }
     @objc private func openCaptures() { NSWorkspace.shared.open(Settings.capturesDirectory) }
 }
 
