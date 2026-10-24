@@ -14,10 +14,12 @@ public enum TooltipReader {
         public var ocrSeconds: Double
     }
 
-    public static func read(image: CGImage, cursor: CGPoint?) throws -> Result {
+    /// `recognizer` does the OCR; the app swaps in a helper process when Vision breaks in its own process.
+    public static func read(image: CGImage, cursor: CGPoint?,
+                            recognizer: (CGImage) throws -> [OCRLine] = recognize) throws -> Result {
         let t0 = Date()
         let pixels = PixelBuffer(image: image)
-        let all = try recognize(image).map { line -> OCRLine in
+        let all = try recognizer(image).map { line -> OCRLine in
             var l = line
             l.color = pixels?.textColor(in: l.rect) ?? .other
             l.background = pixels?.backgroundLevel(in: l.rect)
@@ -254,15 +256,16 @@ public enum TooltipReader {
     /// PoE 2 skill gem tooltips put the name, tags, level and cost left-aligned above the centred description,
     /// which is all the centre-aligned search finds. Returns that stack: dark-panel lines directly above
     /// `members`, inside the tooltip's width, at least three of them sharing a left edge, with a skill's
-    /// "Level:" line and a "Cost:" or "Requires:" line (stash and inventory labels above item tooltips have neither).
+    /// level or category line and a cost/requirement line (stash and inventory labels above item tooltips have neither).
     static func leftAlignedHeader(above members: [OCRLine], in usable: [OCRLine], isDark: (OCRLine) -> Bool) -> [OCRLine] {
         guard let top = members.min(by: { $0.rect.minY < $1.rect.minY }) else { return [] }
         let span = members.reduce(CGRect.null) { $0.union($1.rect) }
         let heights = members.map(\.rect.height).sorted()
         let h = heights[heights.count / 2]
         let candidates = usable.filter { l in
-            // The name is in a larger font; the "GAME PAUSED" watermark behind it reads uncoloured.
-            l.rect.maxY <= top.rect.minY + 2 && isDark(l) && !members.contains(l) && l.rect.height < 1.7 * h && l.color != .other
+            // The name is in a larger font; the "GAME PAUSED" watermark behind it is larger still and uncoloured.
+            l.rect.maxY <= top.rect.minY + 2 && isDark(l) && !members.contains(l) && l.rect.height < 1.7 * h
+                && !(l.color == .other && l.rect.height > 1.4 * h)
                 && l.rect.minX >= span.minX - 0.25 * span.width && l.rect.minX < span.midX - 0.1 * span.width
                 && l.rect.maxX <= span.maxX + 20
         }.sorted { $0.rect.minY > $1.rect.minY }
@@ -277,9 +280,11 @@ public enum TooltipReader {
         guard lefts.count >= 3 else { return [] }
         let median = lefts[lefts.count / 2]
         guard lefts.filter({ abs($0 - median) < 12 }).count >= 3 else { return [] }
+        // Skill gems show "Level:" and "Cost:"/"Requires:"; support gems "Category:" and "Support Requirements:".
         let texts = out.map { TextUtil.clean($0.text).lowercased() }
-        guard texts.contains(where: { $0.hasPrefix("level") }),
-              texts.contains(where: { $0.hasPrefix("cost") || $0.contains("requires") }) else { return [] }
+        guard texts.contains(where: { $0.hasPrefix("level") || $0.hasPrefix("category") }),
+              texts.contains(where: { $0.hasPrefix("cost") || $0.contains("requires") || $0.contains("requirements")
+                  || $0.contains("reservation") }) else { return [] }
         return out
     }
 

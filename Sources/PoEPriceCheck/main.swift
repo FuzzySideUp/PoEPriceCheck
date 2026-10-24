@@ -215,6 +215,11 @@ final class ClosureMenuItem: NSMenuItem {
     @objc private func fire() { closure() }
 }
 
+// A helper copy of the app that only OCRs one image (see OCRHelper).
+if let i = CommandLine.arguments.firstIndex(of: "--ocr-helper"), CommandLine.arguments.count > i + 1 {
+    exit(OCRHelper.runHelper(path: CommandLine.arguments[i + 1]))
+}
+
 MainActor.assumeIsolated {
     let app = NSApplication.shared
     let delegate = AppDelegate()

@@ -80,7 +80,7 @@ public struct ItemParser {
             var i = 0
             while i < block.count {
                 let line = block[i]
-                let text = TextUtil.clean(line.text)
+                let text = Self.stripRollRanges(TextUtil.clean(line.text))
                 i += 1
                 if text.isEmpty || text == Self.separator { continue }
                 if itemClasses.contains(TextUtil.normalize(text)) { continue }   // "RING", "BODY ARMOUR"…
@@ -100,7 +100,7 @@ public struct ItemParser {
                 }
                 // Two-line mods (same colour, and the next line isn't a mod on its own)
                 if i < block.count, block[i].color == line.color, data.matchStat(block[i].text) == nil {
-                    let joined = text + "\n" + TextUtil.clean(block[i].text)
+                    let joined = text + "\n" + Self.stripRollRanges(TextUtil.clean(block[i].text))
                     if let mod = modLine(joined, color: line.color) {
                         mods.append(mod)
                         i += 1
@@ -246,8 +246,10 @@ public struct ItemParser {
             if let t = TextUtil.numbers(in: text).first { item.properties["Unidentified Tier"] = String(Int(t)) }
             return true
         }
-        if lower.hasPrefix("item level") {
-            item.itemLevel = TextUtil.numbers(in: text).first.map { Int($0) }
+        // "Item Level: 80", or with the advanced view "Body Armour: Item Level 80" (class and level on one line).
+        if let r = lower.range(of: "item level"),
+           lower[..<r.lowerBound].allSatisfy({ $0.isLetter || $0 == " " || $0 == ":" }) {
+            item.itemLevel = TextUtil.numbers(in: String(lower[r.upperBound...])).first.map { Int($0) }
             return true
         }
         if let r = lower.range(of: "stack size") {
@@ -276,6 +278,16 @@ public struct ItemParser {
             if lower.hasPrefix("note:") || lower.hasPrefix("travel to this") || lower.hasPrefix("can only be used") { return true }
         }
         return false
+    }
+
+    private static let rollRange = try! NSRegularExpression(pattern: #"\(\s*[+\-]?\d+(?:\.\d+)?\s*-\s*[+\-]?\d+(?:\.\d+)?\s*\)"#)
+
+    /// The advanced item view (Alt, or "advanced mod descriptions" on) puts each mod's roll range after its value:
+    /// "+80(70-84) to maximum Life" -> "+80 to maximum Life".
+    static func stripRollRanges(_ s: String) -> String {
+        guard s.contains("(") else { return s }
+        let ns = s as NSString
+        return rollRange.stringByReplacingMatches(in: s, range: NSRange(location: 0, length: ns.length), withTemplate: "")
     }
 
     /// "Armour: 412" -> ("Armour", "412"). Only for known property labels. Tolerates OCR junk before the

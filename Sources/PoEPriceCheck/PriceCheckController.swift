@@ -240,10 +240,10 @@ final class PriceCheckController {
         Log.info("captured \(capture.image.width)x\(capture.image.height) cursor=\(capture.cursorInImage) scale=\(capture.scale)")
         let image = capture.image, cursor = capture.cursorInImage
         let read = try await Task.detached(priority: .userInitiated) {
-            try TooltipReader.read(image: image, cursor: cursor)
+            try OCRHelper.read(image: image, cursor: cursor)
         }.value
         Log.info(String(format: "ocr %.2fs%@: %d lines total, %d in tooltip %@", read.ocrSeconds,
-                        TooltipReader.engine == .neuralEngine ? "" : " (\(TooltipReader.engine))", read.allLines.count, read.lines.count, "\(read.tooltipRect)"))
+                        (OCRHelper.inUse ? " (helper)" : TooltipReader.engine == .neuralEngine ? "" : " (\(TooltipReader.engine))"), read.allLines.count, read.lines.count, "\(read.tooltipRect)"))
         let item = parse(read, windowTitle: Self.frontWindowTitle())
         Log.info("parsed: rarity=\(item.rarity) name=\(item.name ?? "-") base=\(item.baseType ?? "-") ilvl=\(item.itemLevel.map(String.init) ?? "-") mods=\(item.mods.count)")
         return (capture, read, item)
@@ -274,7 +274,28 @@ final class PriceCheckController {
         let titles = info.filter { ($0[kCGWindowOwnerPID as String] as? pid_t) == pid && ($0[kCGWindowLayer as String] as? Int) == 0 }
             .compactMap { $0[kCGWindowName as String] as? String }.filter { !$0.isEmpty }
         Log.info("window titles: \(titles)")
-        return titles.first { GameDetector.game(inTitle: $0) != nil } ?? titles.first
+        if let t = titles.first(where: { GameDetector.game(inTitle: $0) != nil }) { return t }
+        // CrossOver/Wine windows have no title, but the game's command line names its install folder
+        // ("…\Path of Exile 2\PathOfExileSteam.exe").
+        if let cmd = processArguments(pid).first(where: { GameDetector.game(inTitle: $0) != nil }) {
+            Log.info("game process: \(cmd)")
+            return cmd
+        }
+        return titles.first
+    }
+
+    /// argv of a process (KERN_PROCARGS2), empty when it can't be read.
+    static func processArguments(_ pid: pid_t) -> [String] {
+        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+        var size = 0
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 4 else { return [] }
+        var buf = [UInt8](repeating: 0, count: size)
+        guard sysctl(&mib, 3, &buf, &size, nil, 0) == 0 else { return [] }
+        let argc = Int(buf.withUnsafeBytes { $0.load(as: Int32.self) })
+        // Layout: argc, exec path, NUL padding, then argc NUL-terminated arguments.
+        var parts = buf[4..<size].split(separator: 0, omittingEmptySubsequences: true).map { String(decoding: $0, as: UTF8.self) }
+        if !parts.isEmpty { parts.removeFirst() }   // exec path
+        return Array(parts.prefix(argc))
     }
 
     /// Did the read produce names we actually know?

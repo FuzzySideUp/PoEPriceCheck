@@ -166,6 +166,30 @@ final class ParserTests: XCTestCase {
     }
 }
 
+final class AdvancedViewTests: XCTestCase {
+    /// Alt held (or advanced mod descriptions on): roll ranges after values, class and item level on one line.
+    func testRollRangesAndItemLevel() {
+        var lines = TestData.lines("""
+        Glyph Urge
+        Bound Sandals
+        --------
+        Boots: Item Level 81
+        Energy Shield: 162
+        --------
+        99(92-100)% increased Energy Shield
+        +80(70-84) to maximum Life
+        30% increased Movement Speed
+        8.4(6.1-9) Life Regeneration per second
+        """)
+        lines[0].color = .rare; lines[1].color = .rare
+        let item = TestData.parser.parse(lines)
+        XCTAssertEqual(item.itemLevel, 81)
+        XCTAssertEqual(item.mods.map(\.values), [[99], [80], [30], [8.4]])
+        XCTAssertEqual(ItemParser.stripRollRanges("+40(36-40)% to Fire Resistance"), "+40% to Fire Resistance")
+        XCTAssertEqual(ItemParser.stripRollRanges("Level: 20 (Max)"), "Level: 20 (Max)")
+    }
+}
+
 final class StatMatchTests: XCTestCase {
     let data = TestData.gameData
 
